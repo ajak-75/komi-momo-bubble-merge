@@ -5,6 +5,7 @@ import {
   defaultSave,
   loadSave,
   markSeen,
+  mergeProgress,
   parseSave,
   writeSave,
 } from '../src/core/storage';
@@ -94,5 +95,16 @@ describe('save file', () => {
   it('keeps the collection ordered and deduplicated', () => {
     const save = commitRun(defaultSave(), 10, ['legend', 'momo-1', 'legend', 'komi-4', 'unknown']);
     expect(save.discovered).toEqual(['momo-1', 'komi-4', 'legend']);
+  });
+
+  it('saves progress mid-run without counting a run', () => {
+    const running = mergeProgress(defaultSave(), 120, ['komi-1', 'komi-2']);
+    expect(running.best).toBe(120);
+    expect(running.runs).toBe(0);
+    expect(running.unseen).toEqual(['komi-1', 'komi-2']);
+    const again = mergeProgress(running, 40, ['komi-1']);
+    expect(again.best).toBe(120);
+    expect(again.discovered).toEqual(['komi-1', 'komi-2']);
+    expect(again.unseen).toEqual(['komi-1', 'komi-2']);
   });
 });

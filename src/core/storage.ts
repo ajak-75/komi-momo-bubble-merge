@@ -94,8 +94,8 @@ export function writeSave(store: Store, data: SaveData): void {
   }
 }
 
-/** Merges a finished run into the save file. Returns the new save. */
-export function commitRun(save: SaveData, score: number, discovered: Iterable<string>): SaveData {
+/** Merges a run's best score and discoveries into the save file (no run counter). */
+export function mergeProgress(save: SaveData, score: number, discovered: Iterable<string>): SaveData {
   const merged = new Set(save.discovered);
   const unseen = new Set(save.unseen);
   for (const id of discovered) {
@@ -110,8 +110,12 @@ export function commitRun(save: SaveData, score: number, discovered: Iterable<st
     best: Math.max(save.best, Math.floor(score)),
     discovered: COLLECTION_ORDER.filter((id) => merged.has(id)),
     unseen: COLLECTION_ORDER.filter((id) => unseen.has(id)),
-    runs: save.runs + 1,
   };
+}
+
+/** Merges a finished run into the save file. Returns the new save. */
+export function commitRun(save: SaveData, score: number, discovered: Iterable<string>): SaveData {
+  return { ...mergeProgress(save, score, discovered), runs: save.runs + 1 };
 }
 
 export function markSeen(save: SaveData): SaveData {

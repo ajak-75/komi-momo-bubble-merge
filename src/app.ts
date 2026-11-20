@@ -5,7 +5,7 @@ import { AudioEngine } from './audio';
 import { applyStaticText, localized, t } from './i18n';
 import type { StringKey } from './i18n';
 import { ALL_DEFS, LEGENDARY, KOMI_LINE, MOMO_LINE, TROPHY_GOLD, TROPHY_HANBOK } from './core/config';
-import { commitRun, defaultSave, loadSave, markSeen, writeSave } from './core/storage';
+import { commitRun, defaultSave, loadSave, markSeen, mergeProgress, writeSave } from './core/storage';
 import type { SaveData } from './core/storage';
 import type { BubbleDef, GameEvent, Lang } from './core/types';
 
@@ -222,6 +222,13 @@ export async function bootstrap(): Promise<void> {
     refreshMenuStats();
   };
 
+  /** Keeps the best score and the collection safe even if the tab is closed mid-run. */
+  const flushProgress = (): void => {
+    if (game.state === 'idle') return;
+    save = mergeProgress(save, game.score, game.discovered);
+    persist();
+  };
+
   const openCollection = (): void => {
     game.pause();
     // Draw the grid first so the NEW badges of this run are visible, then clear them.
@@ -370,6 +377,7 @@ export async function bootstrap(): Promise<void> {
           break;
         case 'discover': {
           const def = ALL_DEFS.find((d) => d.id === ev.id);
+          flushProgress();
           if (def && (def.level >= 3 || def.special)) {
             showToast(def);
             audio.playDiscover();
@@ -517,8 +525,12 @@ export async function bootstrap(): Promise<void> {
   }
 
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden && game.state === 'playing') togglePause();
+    if (document.hidden) {
+      flushProgress();
+      if (game.state === 'playing') togglePause();
+    }
   });
+  window.addEventListener('pagehide', flushProgress);
 
   refreshText();
   renderCollection();
