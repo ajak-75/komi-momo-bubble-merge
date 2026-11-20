@@ -357,6 +357,7 @@ export async function bootstrap(): Promise<void> {
           audio.playAbsorb();
           break;
         case 'legendary':
+          renderer.implode(ev.x, ev.y, '#ffe9a8', 34);
           renderer.legendaryBurst(ev.x, ev.y);
           renderer.floater(ev.x, ev.y - 40, `+${ev.points}`, '#ffe9a8', 40);
           audio.playLegendary();

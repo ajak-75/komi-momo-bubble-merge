@@ -146,6 +146,27 @@ export class Renderer {
     this.shake = Math.max(this.shake, power);
   }
 
+  /** Golden energy gathering into one point (played right before the fusion flash). */
+  implode(x: number, y: number, color = '#ffe9a8', count = 30): void {
+    for (let i = 0; i < count; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const dist = 70 + Math.random() * 150;
+      const speed = 190 + Math.random() * 190;
+      const life = 0.45 + Math.random() * 0.2;
+      this.particles.push({
+        x: x + Math.cos(a) * dist,
+        y: y + Math.sin(a) * dist,
+        vx: -Math.cos(a) * speed,
+        vy: -Math.sin(a) * speed,
+        life,
+        maxLife: life,
+        size: 2 + Math.random() * 3.5,
+        color,
+        kind: 'spark',
+      });
+    }
+  }
+
   legendaryBurst(x: number, y: number): void {
     this.kick(16);
     for (let i = 0; i < 4; i++) {
