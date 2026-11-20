@@ -38,8 +38,7 @@
   </head>
   <body>
     <div class="app">
-      <div class="stage">
-        <div class="board" id="board">
+      <div class="stage">        <div class="board" id="board">
           <canvas id="gameCanvas" aria-label="KOMI & MOMO bubble merge play field"></canvas>
 
           <!-- ============================ game hud ============================ -->
@@ -178,5 +177,9 @@
       </div>
     </div>
     <script type="module" src="./src/main.ts"></script>
+    <div class="rotate-hint" id="rotateHint">
+      <span class="rotate-ico">⟳</span>
+      <p data-i18n="rotate">Rotate your phone to portrait</p>
+    </div>
   </body>
 </html>
