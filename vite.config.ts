@@ -2,9 +2,10 @@ import { defineConfig } from 'vite';
 
 // GitHub Pages project site: https://ajak-75.github.io/komi-momo-bubble-merge/
 // The build is written into /docs so Pages can serve it straight from the main branch
-// without any GitHub Actions workflow.
+// without any GitHub Actions workflow. A relative base keeps the same build working
+// from /docs on Pages as well as from any static file host or CDN preview.
 export default defineConfig({
-  base: '/komi-momo-bubble-merge/',
+  base: './',
   build: {
     outDir: 'docs',
     emptyOutDir: true,
