@@ -1,12 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   SAVE_KEY,
-  commitRun,
   defaultSave,
   loadSave,
-  markSeen,
-  mergeProgress,
   parseSave,
+  recordRun,
+  rememberLevel,
   writeSave,
 } from '../src/core/storage';
 import type { Store } from '../src/core/storage';
@@ -25,86 +24,64 @@ function memoryStore(initial: Record<string, string> = {}): Store & { data: Reco
 describe('save file', () => {
   it('starts from defaults when nothing is stored', () => {
     const save = loadSave(memoryStore());
+    expect(save.version).toBe(2);
     expect(save.best).toBe(0);
-    expect(save.discovered).toEqual([]);
-    expect(save.settings).toEqual({ sfx: true, bgm: true, lang: 'en' });
+    expect(save.level).toBe(1);
+    expect(save.runs).toBe(0);
+    expect(save.settings).toMatchObject({ sfx: true, bgm: true });
   });
 
-  it('round-trips best score, collection and settings', () => {
+  it('round-trips score, stage and settings', () => {
     const store = memoryStore();
     const save = {
       ...defaultSave(),
       best: 4321,
-      discovered: ['momo-1', 'momo-2', 'legend'],
+      level: 7,
+      runs: 12,
       settings: { sfx: false, bgm: true, lang: 'ko' as const },
     };
     writeSave(store, save);
-    const loaded = loadSave(store);
-    expect(loaded.best).toBe(4321);
-    expect(loaded.discovered).toEqual(['momo-1', 'momo-2', 'legend']);
-    expect(loaded.settings).toEqual({ sfx: false, bgm: true, lang: 'ko' });
-    expect(store.data[SAVE_KEY]).toContain('4321');
+    expect(store.data[SAVE_KEY]).toBeTruthy();
+    expect(loadSave(store)).toEqual(save);
   });
 
-  it('survives corrupt, partial and unknown data', () => {
-    expect(parseSave('not json').best).toBe(0);
-    expect(parseSave('{"best":"lots"').discovered).toEqual([]);
-    const partial = parseSave(JSON.stringify({ best: 12, discovered: ['momo-1', 'nope', 'momo-1'] }));
-    expect(partial.best).toBe(12);
-    expect(partial.discovered).toEqual(['momo-1']);
-    expect(partial.settings).toEqual({ sfx: true, bgm: true, lang: 'en' });
-    const weird = parseSave(JSON.stringify({ best: -5, discovered: 'x', settings: { lang: 'fr' } }));
-    expect(weird.best).toBe(0);
-    expect(weird.discovered).toEqual([]);
-    expect(weird.settings.lang).toBe('en');
+  it('survives broken json and damaged fields', () => {
+    expect(parseSave('not json')).toEqual(defaultSave());
+    expect(parseSave('null')).toEqual(defaultSave());
+    const repaired = parseSave(
+      JSON.stringify({ best: -5, level: 0, runs: 'lots', settings: { sfx: 'yes', bgm: false, lang: 'fr' } }),
+    );
+    expect(repaired.best).toBe(0);
+    expect(repaired.level).toBe(1);
+    expect(repaired.runs).toBe(0);
+    expect(repaired.settings.bgm).toBe(false);
+    expect(['en', 'ko']).toContain(repaired.settings.lang);
   });
 
-  it('ignores a store that throws (private mode)', () => {
-    const throwing: Store = {
+  it('survives a store that throws', () => {
+    const store: Store = {
       getItem: () => {
         throw new Error('blocked');
       },
       setItem: () => {
-        throw new Error('blocked');
+        throw new Error('quota');
       },
     };
-    expect(loadSave(throwing).best).toBe(0);
-    expect(() => writeSave(throwing, defaultSave())).not.toThrow();
+    expect(loadSave(store)).toEqual(defaultSave());
+    expect(() => writeSave(store, defaultSave())).not.toThrow();
   });
 
-  it('commits a run: best score, discoveries, run count and NEW badges', () => {
-    let save = defaultSave();
-    save = commitRun(save, 900, ['momo-1', 'komi-2']);
+  it('records a finished run', () => {
+    const save = recordRun({ ...defaultSave(), best: 900, level: 3, runs: 2 }, 1200.7, 4);
+    expect(save.best).toBe(1200);
+    expect(save.level).toBe(4);
+    expect(save.runs).toBe(3);
+  });
+
+  it('never lowers the best score or stage mid-run', () => {
+    const save = rememberLevel({ ...defaultSave(), best: 900, level: 5, runs: 3 }, 400, 2);
     expect(save.best).toBe(900);
-    expect(save.runs).toBe(1);
-    expect(save.discovered).toEqual(['momo-1', 'komi-2']);
-    expect(save.unseen).toEqual(['momo-1', 'komi-2']);
-
-    save = commitRun(save, 400, ['momo-2']);
-    expect(save.best).toBe(900);
-    expect(save.runs).toBe(2);
-    expect(save.discovered).toEqual(['momo-1', 'momo-2', 'komi-2']);
-    expect(save.unseen).toEqual(['momo-1', 'momo-2', 'komi-2']);
-
-    save = markSeen(save);
-    expect(save.unseen).toEqual([]);
-    save = commitRun(save, 100, ['momo-1']);
-    expect(save.unseen).toEqual([]);
-  });
-
-  it('keeps the collection ordered and deduplicated', () => {
-    const save = commitRun(defaultSave(), 10, ['legend', 'momo-1', 'legend', 'komi-4', 'unknown']);
-    expect(save.discovered).toEqual(['momo-1', 'komi-4', 'legend']);
-  });
-
-  it('saves progress mid-run without counting a run', () => {
-    const running = mergeProgress(defaultSave(), 120, ['komi-1', 'komi-2']);
-    expect(running.best).toBe(120);
-    expect(running.runs).toBe(0);
-    expect(running.unseen).toEqual(['komi-1', 'komi-2']);
-    const again = mergeProgress(running, 40, ['komi-1']);
-    expect(again.best).toBe(120);
-    expect(again.discovered).toEqual(['komi-1', 'komi-2']);
-    expect(again.unseen).toEqual(['komi-1', 'komi-2']);
+    expect(save.level).toBe(5);
+    expect(save.runs).toBe(3);
   });
 });

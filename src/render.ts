@@ -1,6 +1,16 @@
-import type { BubbleMergeGame } from './core/game';
-import type { GameBubble } from './core/types';
-import { MAX_WORLD_HEIGHT, MIN_WORLD_HEIGHT, WORLD_WIDTH } from './core/config';
+/**
+ * Canvas renderer.
+ *
+ * The board is drawn in "world units": 720 wide, however tall the device
+ * leaves room for. That keeps one coordinate system for the game logic, the
+ * aim maths and the tests, and the renderer only has to apply one scale.
+ */
+
+import { BUBBLE_RADIUS, BUBBLE_DIAMETER, BOARD_WIDTH, cellX, cellY } from './core/hex';
+import { COLORS } from './core/config';
+import type { BubbleShooter } from './core/game';
+import type { ColorId, Lang, Point } from './core/types';
+import { t } from './i18n';
 
 interface Particle {
   x: number;
@@ -8,439 +18,566 @@ interface Particle {
   vx: number;
   vy: number;
   life: number;
-  maxLife: number;
+  max: number;
   size: number;
   color: string;
-  kind: 'spark' | 'bubble';
+  ring: boolean;
+  spin: number;
+  rot: number;
 }
 
-interface Ring {
+interface Popup {
   x: number;
   y: number;
-  r: number;
-  maxR: number;
   life: number;
-  maxLife: number;
-  color: string;
-  width: number;
-}
-
-interface Floater {
-  x: number;
-  y: number;
+  max: number;
   text: string;
-  life: number;
-  maxLife: number;
   color: string;
   size: number;
 }
-
-interface Ambient {
-  x: number;
-  y: number;
-  r: number;
-  speed: number;
-  alpha: number;
-  hue: number;
-}
-
-const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
 
 export class Renderer {
-  readonly canvas: HTMLCanvasElement;
+  private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
-  private images: Record<string, HTMLImageElement>;
-  private particles: Particle[] = [];
-  private rings: Ring[] = [];
-  private floaters: Floater[] = [];
-  private ambient: Ambient[] = [];
-  private scale = 1;
-  private offsetX = 0;
-  private offsetY = 0;
   private dpr = 1;
-  private shake = 0;
-  private t = 0;
-  /** World height for the current viewport: the play field always fills the screen. */
-  worldHeight = 1280;
+  private scale = 1;
+  private worldH = 1560;
+  private sprites = new Map<ColorId, HTMLImageElement>();
+  private particles: Particle[] = [];
+  private popups: Popup[] = [];
+  private shakeAmt = 0;
+  private stars: Array<{ x: number; y: number; r: number; phase: number }> = [];
+  private time = 0;
+  private flash = 0;
 
-  constructor(canvas: HTMLCanvasElement, images: Record<string, HTMLImageElement>) {
-    const ctx = canvas.getContext('2d', { alpha: true });
-    if (!ctx) throw new Error('canvas 2d context unavailable');
+  constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
+    const ctx = canvas.getContext('2d', { alpha: false });
+    if (!ctx) throw new Error('canvas 2d context unavailable');
     this.ctx = ctx;
-    this.images = images;
-    this.buildAmbient();
+    this.makeStars();
   }
 
-  private buildAmbient(): void {
-    this.ambient = [];
-    // deterministic pseudo random so the scene does not reshuffle on resize
-    let s = 1337;
-    const rand = (): number => {
-      s = (s * 1103515245 + 12345) % 2147483648;
-      return s / 2147483648;
-    };
-    for (let i = 0; i < 26; i++) {
-      this.ambient.push({
-        x: rand() * WORLD_WIDTH,
-        y: rand() * this.worldHeight,
-        r: 8 + rand() * 46,
-        speed: 6 + rand() * 18,
-        alpha: 0.03 + rand() * 0.06,
-        hue: 300 + rand() * 80,
-      });
-    }
+  get worldHeight(): number {
+    return this.worldH;
   }
 
-  resize(): void {
+  /** Preloads the six bubble sprites. Resolves when every one is decoded. */
+  async load(): Promise<void> {
+    const entries = Object.values(COLORS);
+    await Promise.all(
+      entries.map(
+        (color) =>
+          new Promise<void>((resolve) => {
+            const img = new Image();
+            img.decoding = 'async';
+            img.onload = () => resolve();
+            img.onerror = () => resolve();
+            img.src = color.sprite;
+            this.sprites.set(color.id, img);
+          }),
+      ),
+    );
+  }
+
+  resize(): number {
     const rect = this.canvas.getBoundingClientRect();
-    const w = Math.max(1, rect.width);
-    const h = Math.max(1, rect.height);
-    this.dpr = Math.min(2, window.devicePixelRatio || 1);
-    this.canvas.width = Math.round(w * this.dpr);
-    this.canvas.height = Math.round(h * this.dpr);
-    // The field is always exactly 720 units wide, so the play area fills the width.
-    // How many units are visible vertically depends on the device aspect ratio.
-    this.scale = w / WORLD_WIDTH;
-    const visible = h / this.scale;
-    this.worldHeight = Math.min(MAX_WORLD_HEIGHT, Math.max(MIN_WORLD_HEIGHT, visible));
-    this.offsetX = 0;
-    this.offsetY = (h - this.worldHeight * this.scale) / 2;
-    this.buildAmbient();
+    const cssW = Math.max(240, rect.width);
+    const cssH = Math.max(320, rect.height);
+    this.dpr = Math.min(3, window.devicePixelRatio || 1);
+    this.canvas.width = Math.round(cssW * this.dpr);
+    this.canvas.height = Math.round(cssH * this.dpr);
+    this.scale = (cssW * this.dpr) / BOARD_WIDTH;
+    this.worldH = (cssH * this.dpr) / this.scale;
+    return this.worldH;
   }
 
-  /** Converts a client-space point into world units. */
-  toWorld(clientX: number, clientY: number): { x: number; y: number } {
+  /** Screen (client) point → world point. */
+  toWorld(clientX: number, clientY: number): Point {
     const rect = this.canvas.getBoundingClientRect();
-    return {
-      x: (clientX - rect.left - this.offsetX) / this.scale,
-      y: (clientY - rect.top - this.offsetY) / this.scale,
-    };
+    const x = ((clientX - rect.left) * this.dpr) / this.scale;
+    const y = ((clientY - rect.top) * this.dpr) / this.scale;
+    return { x, y };
   }
 
-  get worldScale(): number {
-    return this.scale;
-  }
-
-  /** Converts a CSS pixel offset from the canvas top into world units. */
-  cssToWorldY(cssY: number): number {
-    return (cssY - this.offsetY) / this.scale;
-  }
-
-  burst(x: number, y: number, color: string, power = 1, count = 14): void {
+  burst(x: number, y: number, color: string, count = 12, power = 1): void {
+    this.particles.push({
+      x,
+      y,
+      vx: 0,
+      vy: 0,
+      life: 0.42,
+      max: 0.42,
+      size: BUBBLE_RADIUS * 0.9 * power,
+      color,
+      ring: true,
+      spin: 0,
+      rot: 0,
+    });
     for (let i = 0; i < count; i++) {
-      const a = Math.random() * Math.PI * 2;
-      const sp = (60 + Math.random() * 240) * power;
-      const life = 0.4 + Math.random() * 0.5;
+      const a = (Math.PI * 2 * i) / count + Math.random() * 0.5;
+      const speed = (180 + Math.random() * 320) * power;
+      const life = 0.5 + Math.random() * 0.45;
       this.particles.push({
         x,
         y,
-        vx: Math.cos(a) * sp,
-        vy: Math.sin(a) * sp - 40,
+        vx: Math.cos(a) * speed,
+        vy: Math.sin(a) * speed,
         life,
-        maxLife: life,
-        size: 2 + Math.random() * 5 * power,
+        max: life,
+        size: 4 + Math.random() * 9 * power,
         color,
-        kind: Math.random() > 0.5 ? 'spark' : 'bubble',
+        ring: false,
+        spin: (Math.random() - 0.5) * 12,
+        rot: Math.random() * Math.PI,
       });
     }
   }
 
-  ring(x: number, y: number, color: string, maxR: number, width = 6): void {
-    this.rings.push({ x, y, r: 6, maxR, life: 0.55, maxLife: 0.55, color, width });
+  popup(x: number, y: number, text: string, color: string, size = 34): void {
+    this.popups.push({ x, y, life: 1.05, max: 1.05, text, color, size });
   }
 
-  floater(x: number, y: number, text: string, color = '#ffe9a8', size = 30): void {
-    this.floaters.push({ x, y, text, life: 1.1, maxLife: 1.1, color, size });
+  shake(amount: number): void {
+    this.shakeAmt = Math.min(18, this.shakeAmt + amount);
   }
 
-  kick(power: number): void {
-    this.shake = Math.max(this.shake, power);
+  flashScreen(amount = 0.4): void {
+    this.flash = Math.max(this.flash, amount);
   }
 
-  /** Golden energy gathering into one point (played right before the fusion flash). */
-  implode(x: number, y: number, color = '#ffe9a8', count = 30): void {
-    for (let i = 0; i < count; i++) {
-      const a = Math.random() * Math.PI * 2;
-      const dist = 70 + Math.random() * 150;
-      const speed = 190 + Math.random() * 190;
-      const life = 0.45 + Math.random() * 0.2;
-      this.particles.push({
-        x: x + Math.cos(a) * dist,
-        y: y + Math.sin(a) * dist,
-        vx: -Math.cos(a) * speed,
-        vy: -Math.sin(a) * speed,
-        life,
-        maxLife: life,
-        size: 2 + Math.random() * 3.5,
-        color,
-        kind: 'spark',
-      });
+  private makeStars(): void {
+    const rng = (() => {
+      let s = 20261120;
+      return () => {
+        s = (s * 1103515245 + 12345) & 0x7fffffff;
+        return s / 0x7fffffff;
+      };
+    })();
+    this.stars = Array.from({ length: 44 }, () => ({
+      x: rng() * BOARD_WIDTH,
+      y: rng(),
+      r: 0.8 + rng() * 1.8,
+      phase: rng() * Math.PI * 2,
+    }));
+  }
+
+  private drawSprite(id: ColorId, x: number, y: number, size = BUBBLE_DIAMETER, alpha = 1, rot = 0): void {
+    const img = this.sprites.get(id);
+    if (!img || !img.complete || img.naturalWidth === 0) {
+      this.ctx.fillStyle = COLORS[id].tint;
+      this.ctx.globalAlpha = alpha;
+      this.ctx.beginPath();
+      this.ctx.arc(x, y, size / 2, 0, Math.PI * 2);
+      this.ctx.fill();
+      this.ctx.globalAlpha = 1;
+      return;
     }
-  }
-
-  legendaryBurst(x: number, y: number): void {
-    this.kick(16);
-    for (let i = 0; i < 4; i++) {
-      window.setTimeout(() => this.ring(x, y, '#ffd76a', 160 + i * 90, 10 - i * 2), i * 90);
-    }
-    this.burst(x, y, '#ffe9a8', 2.2, 40);
-    this.burst(x, y, '#ff8bd0', 1.6, 24);
-  }
-
-  /** Draws one frame. `dtMs` is real elapsed time. */
-  draw(game: BubbleMergeGame, dtMs: number): void {
     const ctx = this.ctx;
-    const dt = clamp(dtMs, 0, 64) / 1000;
-    this.t += dt;
+    ctx.globalAlpha = alpha;
+    if (rot !== 0) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(rot);
+      ctx.drawImage(img, -size / 2, -size / 2, size, size);
+      ctx.restore();
+    } else {
+      ctx.drawImage(img, x - size / 2, y - size / 2, size, size);
+    }
+    ctx.globalAlpha = 1;
+  }
 
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+  /** Paints one frame. */
+  render(game: BubbleShooter, dt: number, lang: Lang): void {
+    const ctx = this.ctx;
+    const step = Math.min(0.05, dt);
+    this.time += step;
 
-    const shakeX = this.shake > 0 ? (Math.random() - 0.5) * this.shake : 0;
-    const shakeY = this.shake > 0 ? (Math.random() - 0.5) * this.shake : 0;
-    this.shake = Math.max(0, this.shake - dt * 55);
+    for (const p of this.particles) {
+      p.life -= step;
+      if (!p.ring) {
+        p.vy += 900 * step;
+        p.x += p.vx * step;
+        p.y += p.vy * step;
+        p.vx *= 0.985;
+        p.rot += p.spin * step;
+      }
+    }
+    this.particles = this.particles.filter((p) => p.life > 0);
+    for (const p of this.popups) {
+      p.life -= step;
+      p.y -= 62 * step;
+    }
+    this.popups = this.popups.filter((p) => p.life > 0);
+    this.shakeAmt *= Math.pow(0.0016, step);
+    this.flash = Math.max(0, this.flash - step * 1.8);
 
+    ctx.setTransform(this.scale, 0, 0, this.scale, 0, 0);
+    const shakeX = (Math.random() - 0.5) * this.shakeAmt;
+    const shakeY = (Math.random() - 0.5) * this.shakeAmt;
+    ctx.translate(shakeX, shakeY);
+
+    this.drawBackground();
+
+    const pressure = game.pressure();
+    this.drawDeadline(game, pressure, lang);
+    this.drawCeiling();
+    this.drawBoard(game);
+
+    if (game.phase === 'ready' && !game.flying) this.drawAim(game);
+    this.drawFalling(game);
+    this.drawCannon(game, lang);
+    this.drawFlying(game);
+    this.drawParticles();
+    this.drawPopups();
+
+    if (this.flash > 0) {
+      ctx.fillStyle = `rgba(255,240,210,${this.flash * 0.35})`;
+      ctx.fillRect(-40, -40, BOARD_WIDTH + 80, this.worldH + 80);
+    }
+  }
+
+  private drawBackground(): void {
+    const ctx = this.ctx;
+    const g = ctx.createLinearGradient(0, 0, 0, this.worldH);
+    g.addColorStop(0, '#1d1338');
+    g.addColorStop(0.55, '#140d29');
+    g.addColorStop(1, '#0a0718');
+    ctx.fillStyle = g;
+    ctx.fillRect(-60, -60, BOARD_WIDTH + 120, this.worldH + 120);
+
+    const glow = ctx.createRadialGradient(BOARD_WIDTH / 2, this.worldH * 0.32, 40, BOARD_WIDTH / 2, this.worldH * 0.32, this.worldH * 0.62);
+    glow.addColorStop(0, 'rgba(120,80,255,0.16)');
+    glow.addColorStop(0.6, 'rgba(80,40,160,0.06)');
+    glow.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = glow;
+    ctx.fillRect(0, 0, BOARD_WIDTH, this.worldH);
+
+    for (const s of this.stars) {
+      const tw = 0.35 + 0.65 * Math.abs(Math.sin(this.time * 0.9 + s.phase));
+      ctx.globalAlpha = 0.5 * tw;
+      ctx.fillStyle = '#ffeccd';
+      ctx.beginPath();
+      ctx.arc(s.x, 120 + s.y * (this.worldH - 260), s.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  private drawCeiling(): void {
+    const ctx = this.ctx;
     ctx.save();
-    ctx.translate(this.offsetX * this.dpr + shakeX * this.dpr, this.offsetY * this.dpr + shakeY * this.dpr);
-    ctx.scale(this.scale * this.dpr, this.scale * this.dpr);
-
-    this.drawBackground(ctx);
-    this.drawDangerLine(ctx, game);
-    this.drawBodies(ctx, game);
-    this.drawEffects(ctx, dt);
-    if (game.slowMo > 0) this.drawSlowMotion(ctx, game);
-
+    const grad = ctx.createLinearGradient(0, -6, 0, 34);
+    grad.addColorStop(0, 'rgba(255,236,200,0.30)');
+    grad.addColorStop(0.45, 'rgba(190,150,255,0.16)');
+    grad.addColorStop(1, 'rgba(90,60,160,0.05)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, -6, BOARD_WIDTH, 40);
+    ctx.strokeStyle = 'rgba(255,226,178,0.55)';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(0, 34);
+    ctx.lineTo(BOARD_WIDTH, 34);
+    ctx.stroke();
+    // rivets on every column
+    for (let col = 0; col < 8; col++) {
+      const x = cellX(0, col);
+      ctx.beginPath();
+      ctx.fillStyle = 'rgba(255,235,200,0.5)';
+      ctx.arc(x, 20, 3.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
     ctx.restore();
   }
 
-  private drawBackground(ctx: CanvasRenderingContext2D): void {
-    const H = this.worldHeight;
-    const grad = ctx.createLinearGradient(0, 0, 0, H);
-    grad.addColorStop(0, '#141634');
-    grad.addColorStop(0.45, '#101226');
-    grad.addColorStop(1, '#1b1030');
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, WORLD_WIDTH, H);
-
-    const glow = ctx.createRadialGradient(WORLD_WIDTH / 2, H * 0.18, 40, WORLD_WIDTH / 2, H * 0.18, 620);
-    glow.addColorStop(0, 'rgba(255, 196, 120, 0.16)');
-    glow.addColorStop(1, 'rgba(255, 196, 120, 0)');
-    ctx.fillStyle = glow;
-    ctx.fillRect(0, 0, WORLD_WIDTH, H);
-
-    for (const a of this.ambient) {
-      const y = ((a.y - this.t * a.speed) % (H + 200) + H + 200) % (H + 200) - 100;
-      ctx.beginPath();
-      ctx.arc(a.x, y, a.r, 0, Math.PI * 2);
-      ctx.fillStyle = `hsla(${a.hue}, 80%, 70%, ${a.alpha})`;
-      ctx.fill();
-    }
-
-    // floor
-    const floor = ctx.createLinearGradient(0, H - 90, 0, H);
-    floor.addColorStop(0, 'rgba(255, 214, 150, 0)');
-    floor.addColorStop(1, 'rgba(255, 214, 150, 0.16)');
-    ctx.fillStyle = floor;
-    ctx.fillRect(0, H - 90, WORLD_WIDTH, 90);
-  }
-
-  private drawDangerLine(ctx: CanvasRenderingContext2D, game: BubbleMergeGame): void {
-    if (game.state === 'idle') return;
-    const danger = game.dangerRatio();
-    const lineY = game.dangerY;
+  private drawDeadline(game: BubbleShooter, pressure: number, lang: Lang): void {
+    const ctx = this.ctx;
+    const y = game.deadlineY;
+    const pulse = pressure > 0.55 ? 0.45 + 0.35 * Math.abs(Math.sin(this.time * 4)) : 0.24;
     ctx.save();
-    ctx.setLineDash([14, 12]);
+    ctx.setLineDash([16, 14]);
     ctx.lineWidth = 3;
-    ctx.strokeStyle = danger > 0 ? `rgba(255, 90, 110, ${0.35 + danger * 0.6})` : 'rgba(255, 235, 255, 0.18)';
+    ctx.strokeStyle = `rgba(255,96,130,${pulse})`;
     ctx.beginPath();
-    ctx.moveTo(10, lineY);
-    ctx.lineTo(WORLD_WIDTH - 10, lineY);
+    ctx.moveTo(0, y);
+    ctx.lineTo(BOARD_WIDTH, y);
     ctx.stroke();
     ctx.restore();
-
-    if (danger > 0) {
-      const band = ctx.createLinearGradient(0, lineY - 40, 0, lineY + 60);
-      band.addColorStop(0, `rgba(255, 60, 90, ${0.05 + danger * 0.16})`);
-      band.addColorStop(1, 'rgba(255, 60, 90, 0)');
-      ctx.fillStyle = band;
-      ctx.fillRect(0, lineY - 40, WORLD_WIDTH, 100);
+    if (pressure > 0.72) {
+      ctx.save();
+      ctx.font = '700 24px "Trebuchet MS", system-ui, sans-serif';
+      ctx.fillStyle = `rgba(255,140,160,${0.5 + 0.4 * Math.abs(Math.sin(this.time * 5))})`;
+      ctx.textAlign = 'right';
+      ctx.fillText(t(lang, 'danger'), BOARD_WIDTH - 18, y - 14);
+      ctx.restore();
     }
   }
 
-  private drawBodies(ctx: CanvasRenderingContext2D, game: BubbleMergeGame): void {
-    const bodies = game.liveBubbles();
-    for (const b of bodies) this.drawBubble(ctx, b, game.time);
-
-    if (game.current && game.state === 'playing') {
-      const def = game.current;
-      const x = game.heldX();
-      const bob = Math.sin(this.t * 3.2) * 5;
-      const y = game.holdY + bob;
-      ctx.save();
-      ctx.setLineDash([6, 16]);
-      ctx.strokeStyle = 'rgba(255, 230, 180, 0.22)';
-      ctx.lineWidth = 2;
+  private drawBoard(game: BubbleShooter): void {
+    const ctx = this.ctx;
+    // soft bed behind the stack so the art's glass edge never sits on raw background
+    ctx.save();
+    for (const bubble of game.bubbles()) {
+      const x = cellX(bubble.row, bubble.col);
+      const y = cellY(bubble.row, game.topRow, game.ceilingY);
+      ctx.fillStyle = 'rgba(10,6,24,0.55)';
       ctx.beginPath();
-      ctx.moveTo(x, y + def.radius);
-      ctx.lineTo(x, this.worldHeight - 8);
+      ctx.arc(x, y + 3, BUBBLE_RADIUS - 1, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+    for (const bubble of game.bubbles()) {
+      this.drawSprite(bubble.color, cellX(bubble.row, bubble.col), cellY(bubble.row, game.topRow, game.ceilingY), BUBBLE_DIAMETER + 1);
+    }
+  }
+
+  private drawAim(game: BubbleShooter): void {
+    const ctx = this.ctx;
+    const { trace, cell } = game.aim();
+    const points = trace.points;
+    const tint = COLORS[game.current].glow;
+
+    // dotted path, fading with distance
+    let travelled = 0;
+    const spacing = 26;
+    const total = trace.length;
+    for (let i = 1; i < points.length; i++) {
+      const a = points[i - 1];
+      const b = points[i];
+      const seg = Math.hypot(b.x - a.x, b.y - a.y);
+      let d = 0;
+      while (d < seg) {
+        const t01 = d / seg;
+        const x = a.x + (b.x - a.x) * t01;
+        const y = a.y + (b.y - a.y) * t01;
+        const along = travelled + d;
+        const fade = Math.max(0.12, 1 - along / Math.max(520, total * 1.1));
+        ctx.globalAlpha = 0.55 * fade;
+        ctx.fillStyle = tint;
+        ctx.beginPath();
+        ctx.arc(x, y, 4.6 - 1.6 * (1 - fade), 0, Math.PI * 2);
+        ctx.fill();
+        d += spacing;
+      }
+      travelled += seg;
+    }
+    ctx.globalAlpha = 1;
+
+    if (cell) {
+      const cx = cellX(cell.row, cell.col);
+      const cy = cellY(cell.row, game.topRow, game.ceilingY);
+      ctx.save();
+      ctx.setLineDash([8, 8]);
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+      ctx.beginPath();
+      ctx.arc(cx, cy, BUBBLE_RADIUS - 4, 0, Math.PI * 2);
       ctx.stroke();
       ctx.restore();
-
-      const ghost: GameBubble = {
-        id: -1,
-        def,
-        x,
-        y,
-        vx: 0,
-        vy: 0,
-        r: def.radius,
-        mass: 1,
-        alive: true,
-        bornAt: game.time - 1,
-        mergeReadyAt: 0,
-      };
-      this.drawBubble(ctx, ghost, game.time, 0.96);
+      ctx.globalAlpha = 0.16;
+      ctx.fillStyle = COLORS[game.current].glow;
+      ctx.beginPath();
+      ctx.arc(cx, cy, BUBBLE_RADIUS - 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    } else if (trace.hitBubble) {
+      // board is packed — mark what the shot would touch
+      const c = trace.hitBubble;
+      ctx.strokeStyle = 'rgba(255,120,140,0.6)';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, BUBBLE_RADIUS - 2, 0, Math.PI * 2);
+      ctx.stroke();
     }
   }
 
-  private drawBubble(ctx: CanvasRenderingContext2D, b: GameBubble, now: number, alpha = 1): void {
-    const age = now - b.bornAt;
-    const pop = age < 0.22 ? 0.72 + 0.28 * (age / 0.22) + Math.sin((age / 0.22) * Math.PI) * 0.1 : 1;
-    const r = b.r * pop;
-    const img = this.images[b.def.sprite];
+  private drawCannon(game: BubbleShooter, lang: Lang): void {
+    const ctx = this.ctx;
+    const px = game.launcherX;
+    const py = game.launcherY;
 
+    // pedestal
     ctx.save();
-    ctx.globalAlpha = alpha;
-
-    const glow = ctx.createRadialGradient(b.x, b.y, r * 0.6, b.x, b.y, r * 1.35);
-    glow.addColorStop(0, `${hexToRgba(b.def.tint, 0.42)}`);
-    glow.addColorStop(1, `${hexToRgba(b.def.tint, 0)}`);
-    ctx.fillStyle = glow;
-    ctx.beginPath();
-    ctx.arc(b.x, b.y, r * 1.35, 0, Math.PI * 2);
+    const baseY = this.worldH - 54;
+    const grad = ctx.createLinearGradient(px - 110, baseY, px + 110, baseY + 60);
+    grad.addColorStop(0, 'rgba(70,40,120,0.85)');
+    grad.addColorStop(0.5, 'rgba(120,80,190,0.95)');
+    grad.addColorStop(1, 'rgba(60,32,104,0.85)');
+    ctx.fillStyle = grad;
+    roundRect(ctx, px - 104, baseY, 208, 62, 24);
     ctx.fill();
+    ctx.strokeStyle = 'rgba(255,214,150,0.35)';
+    ctx.lineWidth = 2;
+    roundRect(ctx, px - 104, baseY, 208, 62, 24);
+    ctx.stroke();
 
-    if (img && img.complete && img.naturalWidth > 0) {
-      ctx.drawImage(img, b.x - r, b.y - r, r * 2, r * 2);
-    } else {
-      const fallback = ctx.createRadialGradient(b.x - r * 0.3, b.y - r * 0.35, r * 0.15, b.x, b.y, r);
-      fallback.addColorStop(0, 'rgba(255,255,255,0.95)');
-      fallback.addColorStop(0.5, b.def.tint);
-      fallback.addColorStop(1, '#1a1030');
-      ctx.fillStyle = fallback;
-      ctx.beginPath();
-      ctx.arc(b.x, b.y, r, 0, Math.PI * 2);
-      ctx.fill();
-    }
+    // barrel points where the cannon aims
+    const angle = game.angle;
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.rotate(angle);
+    const barrel = ctx.createLinearGradient(0, -22, 0, 22);
+    barrel.addColorStop(0, 'rgba(255,236,200,0.22)');
+    barrel.addColorStop(0.5, 'rgba(190,160,255,0.30)');
+    barrel.addColorStop(1, 'rgba(120,80,200,0.18)');
+    ctx.fillStyle = barrel;
+    roundRect(ctx, -20, -BUBBLE_RADIUS - 30, 40, BUBBLE_RADIUS + 30, 18);
+    ctx.fill();
+    ctx.restore();
+    ctx.restore();
 
-    if (b.def.chain === 'legend') {
-      const aura = ctx.createRadialGradient(b.x, b.y, r * 0.8, b.x, b.y, r * 1.6);
-      aura.addColorStop(0, 'rgba(255, 214, 110, 0.35)');
-      aura.addColorStop(1, 'rgba(255, 214, 110, 0)');
-      ctx.fillStyle = aura;
-      ctx.beginPath();
-      ctx.arc(b.x, b.y, r * 1.6, 0, Math.PI * 2);
-      ctx.fill();
-      for (let i = 0; i < 6; i++) {
-        const a = this.t * 1.2 + (i * Math.PI) / 3;
-        const sx = b.x + Math.cos(a) * r * 1.18;
-        const sy = b.y + Math.sin(a) * r * 1.18;
-        ctx.fillStyle = 'rgba(255, 240, 190, 0.85)';
-        ctx.beginPath();
-        ctx.arc(sx, sy, 3.2, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
+    // current bubble on the muzzle
+    this.drawSprite(game.current, px, py, BUBBLE_DIAMETER * 1.02);
+
+    // next bubble + swap affordance
+    const nx = game.nextX;
+    const ny = py;
+    ctx.save();
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = 'rgba(255,255,255,0.06)';
+    ctx.beginPath();
+    ctx.arc(nx, ny, BUBBLE_RADIUS * 1.1, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    this.drawSprite(game.next, nx, ny, BUBBLE_DIAMETER * 0.8);
+    ctx.font = '700 16px "Trebuchet MS", system-ui, sans-serif';
+    ctx.fillStyle = 'rgba(255,235,205,0.75)';
+    ctx.textAlign = 'center';
+    ctx.fillText(t(lang, 'next'), nx, ny - BUBBLE_RADIUS * 1.5);
+
+    // swap badge, kept left of the next bubble and clear of the firing lane
+    const bx = nx - 76;
+    const by = ny;
+    ctx.fillStyle = 'rgba(255,214,150,0.16)';
+    ctx.beginPath();
+    ctx.arc(bx, by, 26, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,214,150,0.55)';
+    ctx.lineWidth = 2.4;
+    ctx.beginPath();
+    ctx.arc(bx, by, 26, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.strokeStyle = '#ffd9a1';
+    ctx.lineWidth = 2.6;
+    ctx.beginPath();
+    ctx.arc(bx, by, 12, -0.4, Math.PI - 0.9);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(bx, by, 12, Math.PI - 0.4, Math.PI * 2 - 0.9);
+    ctx.stroke();
+    ctx.fillStyle = '#ffd9a1';
+    triangle(ctx, bx + 12, by - 6, 6, -Math.PI / 2);
+    triangle(ctx, bx - 12, by + 6, 6, Math.PI / 2);
+    ctx.font = '700 11px "Trebuchet MS", system-ui, sans-serif';
+    ctx.fillStyle = 'rgba(255,235,205,0.7)';
+    ctx.fillText(t(lang, 'swap'), bx, by + 44);
     ctx.restore();
   }
 
-  private drawEffects(ctx: CanvasRenderingContext2D, dt: number): void {
-    for (let i = this.particles.length - 1; i >= 0; i--) {
-      const p = this.particles[i];
-      p.life -= dt;
-      if (p.life <= 0) {
-        this.particles.splice(i, 1);
-        continue;
-      }
-      p.vy += 520 * dt;
-      p.vx *= 1 - 1.2 * dt;
-      p.x += p.vx * dt;
-      p.y += p.vy * dt;
-      const k = p.life / p.maxLife;
-      ctx.globalAlpha = Math.max(0, k);
-      ctx.fillStyle = p.color;
-      if (p.kind === 'spark') {
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, Math.max(0.6, p.size * k), 0, Math.PI * 2);
-        ctx.fill();
-      } else {
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, Math.max(0.8, p.size * (0.6 + k * 0.8)), 0, Math.PI * 2);
+  private drawFlying(game: BubbleShooter): void {
+    const pos = game.position();
+    if (!pos || !game.flying) return;
+    const color = game.flying.color;
+    for (let i = 3; i >= 1; i--) {
+      const back = pointAlong(game, i * 16);
+      if (back) this.drawSprite(color, back.x, back.y, BUBBLE_DIAMETER * (1 - i * 0.06), 0.16 * (4 - i));
+    }
+    this.drawSprite(color, pos.x, pos.y, BUBBLE_DIAMETER);
+  }
+
+  private drawFalling(game: BubbleShooter): void {
+    for (const f of game.falling) {
+      const alpha = Math.min(1, f.life / 0.7);
+      this.drawSprite(f.color, f.x, f.y, BUBBLE_DIAMETER * (0.9 + 0.1 * (1 - f.life / 2.4)), alpha, f.rot);
+    }
+  }
+
+  private drawParticles(): void {
+    const ctx = this.ctx;
+    for (const p of this.particles) {
+      const k = Math.max(0, p.life / p.max);
+      if (p.ring) {
+        ctx.globalAlpha = 0.5 * k;
         ctx.strokeStyle = p.color;
-        ctx.lineWidth = 1.6;
+        ctx.lineWidth = 6 * k + 1;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size * (1.5 - k * 1.1), 0, Math.PI * 2);
         ctx.stroke();
+      } else {
+        ctx.globalAlpha = 0.9 * k;
+        ctx.fillStyle = p.color;
+        ctx.save();
+        ctx.translate(p.x, p.y);
+        ctx.rotate(p.rot);
+        ctx.beginPath();
+        ctx.ellipse(0, 0, p.size, p.size * 0.62, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
       }
     }
     ctx.globalAlpha = 1;
+  }
 
-    for (let i = this.rings.length - 1; i >= 0; i--) {
-      const r = this.rings[i];
-      r.life -= dt;
-      if (r.life <= 0) {
-        this.rings.splice(i, 1);
-        continue;
-      }
-      const k = 1 - r.life / r.maxLife;
-      ctx.globalAlpha = Math.max(0, 1 - k) * 0.9;
-      ctx.strokeStyle = r.color;
-      ctx.lineWidth = r.width * (1 - k * 0.6);
-      ctx.beginPath();
-      ctx.arc(r.x, r.y, r.r + (r.maxR - r.r) * easeOut(k), 0, Math.PI * 2);
-      ctx.stroke();
-    }
-    ctx.globalAlpha = 1;
-
-    for (let i = this.floaters.length - 1; i >= 0; i--) {
-      const f = this.floaters[i];
-      f.life -= dt;
-      if (f.life <= 0) {
-        this.floaters.splice(i, 1);
-        continue;
-      }
-      const k = f.life / f.maxLife;
+  private drawPopups(): void {
+    const ctx = this.ctx;
+    for (const p of this.popups) {
+      const k = p.life / p.max;
       ctx.globalAlpha = Math.min(1, k * 1.6);
-      ctx.font = `800 ${f.size}px "Trebuchet MS", system-ui, sans-serif`;
+      ctx.font = `800 ${p.size}px "Trebuchet MS", system-ui, sans-serif`;
       ctx.textAlign = 'center';
-      ctx.lineWidth = 5;
-      ctx.strokeStyle = 'rgba(20, 12, 36, 0.75)';
-      ctx.strokeText(f.text, f.x, f.y - (1 - k) * 46);
-      ctx.fillStyle = f.color;
-      ctx.fillText(f.text, f.x, f.y - (1 - k) * 46);
+      ctx.lineWidth = 6;
+      ctx.strokeStyle = 'rgba(8,4,20,0.55)';
+      ctx.strokeText(p.text, p.x, p.y);
+      ctx.fillStyle = p.color;
+      ctx.fillText(p.text, p.x, p.y);
     }
     ctx.globalAlpha = 1;
   }
+}
 
-  private drawSlowMotion(ctx: CanvasRenderingContext2D, game: BubbleMergeGame): void {
-    const k = clamp(game.slowMo / 1.8, 0, 1);
-    const H = this.worldHeight;
-    const g = ctx.createRadialGradient(WORLD_WIDTH / 2, H / 2, 80, WORLD_WIDTH / 2, H / 2, H * 0.8);
-    g.addColorStop(0, `rgba(255, 226, 150, ${0.05 + k * 0.06})`);
-    g.addColorStop(1, `rgba(255, 180, 60, ${0.05 + k * 0.18})`);
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, WORLD_WIDTH, H);
+function pointAlong(game: BubbleShooter, back: number): Point | null {
+  const shot = game.flying;
+  if (!shot) return null;
+  const d = Math.max(0, shot.travel - back);
+  const pts = shot.trace.points;
+  let travelled = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1];
+    const b = pts[i];
+    const seg = Math.hypot(b.x - a.x, b.y - a.y);
+    if (travelled + seg >= d) {
+      const t01 = seg === 0 ? 0 : (d - travelled) / seg;
+      return { x: a.x + (b.x - a.x) * t01, y: a.y + (b.y - a.y) * t01 };
+    }
+    travelled += seg;
   }
+  return null;
 }
 
-function easeOut(k: number): number {
-  return 1 - Math.pow(1 - k, 3);
+function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
+  const radius = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(x + w - radius, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+  ctx.lineTo(x + w, y + h - radius);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+  ctx.lineTo(x + radius, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+  ctx.lineTo(x, y + radius);
+  ctx.quadraticCurveTo(x, y, x + radius, y);
+  ctx.closePath();
 }
 
-function hexToRgba(hex: string, alpha: number): string {
-  const clean = hex.replace('#', '');
-  const n = parseInt(clean.length === 3 ? clean.replace(/(.)/g, '$1$1') : clean, 16);
-  const r = (n >> 16) & 255;
-  const g = (n >> 8) & 255;
-  const b = n & 255;
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+function triangle(ctx: CanvasRenderingContext2D, x: number, y: number, size: number, dir: number): void {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(dir);
+  ctx.beginPath();
+  ctx.moveTo(0, -size);
+  ctx.lineTo(size * 0.72, size * 0.6);
+  ctx.lineTo(-size * 0.72, size * 0.6);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
 }

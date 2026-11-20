@@ -1,369 +1,441 @@
-import type { BubbleDef, GameBubble, GameEvent, GameState } from './types';
-import type { Rng } from './rng';
-import { createRng } from './rng';
-import { PhysicsWorld } from './physics';
-import { mergeRule } from './merge';
-import {
-  COMBO_WINDOW,
-  DANGER_SECONDS,
-  DANGER_Y,
-  DROP_COOLDOWN,
-  DROP_SPEED,
-  DROP_Y,
-  GRAVITY,
-  KOMI_LINE,
-  MAX_COMBO,
-  MOMO_LINE,
-  WORLD_HEIGHT,
-  WORLD_WIDTH,
-  defById,
-} from './config';
+/**
+ * The board, the cannon and the rules of the bubble shooter.
+ *
+ * Everything here is plain data + pure helpers, so the whole game can be
+ * driven from a test with no DOM and no canvas.
+ */
 
-export interface GameOptions {
-  seed?: number;
-  worldWidth?: number;
-  worldHeight?: number;
-  discovered?: Iterable<string>;
-  best?: number;
-  /** Share of level-2 bubbles in the spawn pool (0..1). */
-  level2Chance?: number;
+import {
+  clampAngle,
+  pointAtDistance,
+  traceShot,
+  type BubbleCircle,
+  type TraceResult,
+} from './aim';
+import {
+  CLEAR_BONUS,
+  DROP_POINTS,
+  LAUNCH_ZONE,
+  POP_BASE,
+  POP_EXTRA,
+  SHOT_SPEED,
+  comboMultiplier,
+  levelConfig,
+  type LevelConfig,
+} from './config';
+import {
+  BOARD_WIDTH,
+  BUBBLE_RADIUS,
+  cellKey,
+  cellFromPoint,
+  cellX,
+  cellY,
+  colsInRow,
+  inBounds,
+  neighbors,
+} from './hex';
+import { findCluster, findFloating, gridView } from './match';
+import type { Rng } from './rng';
+import type { Bubble, Cell, ColorId, FallingBubble, Phase } from './types';
+
+export type GameEvent =
+  | { type: 'shoot'; color: ColorId }
+  | { type: 'wall' }
+  | { type: 'pop'; cells: Cell[]; color: ColorId; points: number; combo: number; at: { x: number; y: number } }
+  | { type: 'drop'; count: number; points: number; at: { x: number; y: number } }
+  | { type: 'row' }
+  | { type: 'miss' }
+  | { type: 'clear'; level: number; bonus: number }
+  | { type: 'over' }
+  | { type: 'swap' };
+
+export interface FlyingShot {
+  color: ColorId;
+  trace: TraceResult;
+  travel: number;
+  bouncesPlayed: number;
 }
 
-const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
+const GRAVITY = 2300;
 
-/**
- * Headless game simulation: physics + merge rules + scoring + collection unlocks.
- * It never touches the DOM, so the whole rule set is covered by automated tests.
- */
-export class BubbleMergeGame {
-  readonly world: PhysicsWorld<GameBubble>;
-  state: GameState = 'idle';
+export class BubbleShooter {
+  readonly rng: Rng;
+  height = 1560;
+  topRow = 0;
+  level = 1;
   score = 0;
-  best = 0;
-  current: BubbleDef | null = null;
-  next: BubbleDef | null = null;
-  dropX = WORLD_WIDTH / 2;
-  events: GameEvent[] = [];
-  discovered = new Set<string>();
+  phase: Phase = 'ready';
   combo = 0;
-  comboTimer = 0;
   bestCombo = 0;
-  dangerTimer = 0;
-  time = 0;
-  slowMo = 0;
-  merges = 0;
-  absorbed = 0;
-  legendaries = 0;
-  dropCooldown = 0;
-  /** Y of the game-over line in world units (the app moves it under the HUD). */
-  dangerY = DANGER_Y;
-  /** Y where the held bubble waits before a drop. */
-  holdY = DROP_Y;
-  private rng: Rng;
-  private level2Chance: number;
+  current: ColorId = 'violet';
+  next: ColorId = 'pink';
+  angle = 0;
+  shots = 0;
+  shotsUntilRow = 9;
+  cfg: LevelConfig = levelConfig(1);
+  flying: FlyingShot | null = null;
+  falling: FallingBubble[] = [];
+  events: GameEvent[] = [];
 
-  constructor(opts: GameOptions = {}) {
-    this.rng = createRng(opts.seed ?? 20261120);
-    this.level2Chance = opts.level2Chance ?? 0.2;
-    this.world = new PhysicsWorld<GameBubble>(opts.worldWidth ?? WORLD_WIDTH, opts.worldHeight ?? WORLD_HEIGHT, {
-      gravity: GRAVITY,
-    });
-    this.best = opts.best ?? 0;
-    if (opts.discovered) for (const id of opts.discovered) this.discovered.add(id);
-    this.dropX = this.world.width / 2;
+  private grid = new Map<string, Bubble>();
+
+  constructor(rng: Rng, height = 1560) {
+    this.rng = rng;
+    this.height = height;
+    this.startLevel(1);
   }
 
-  /* ------------------------------------------------------------------ run */
+  /* ------------------------------------------------------------- geometry */
 
-  start(): void {
-    this.state = 'playing';
-    this.score = 0;
+  get ceilingY(): number {
+    return 0;
+  }
+
+  get deadlineY(): number {
+    return this.height - LAUNCH_ZONE;
+  }
+
+  get launcherX(): number {
+    return BOARD_WIDTH / 2;
+  }
+
+  get launcherY(): number {
+    return this.height - 96;
+  }
+
+  get nextX(): number {
+    return BOARD_WIDTH - 124;
+  }
+
+  setHeight(height: number): void {
+    this.height = Math.max(900, height);
+  }
+
+  /* ---------------------------------------------------------------- board */
+
+  bubbles(): Bubble[] {
+    return [...this.grid.values()];
+  }
+
+  bubbleAt(row: number, col: number): Bubble | undefined {
+    return this.grid.get(cellKey(row, col));
+  }
+
+  get count(): number {
+    return this.grid.size;
+  }
+
+  centerOf(row: number, col: number): { x: number; y: number } {
+    return { x: cellX(row, col), y: cellY(row, this.topRow, this.ceilingY) };
+  }
+
+  /** Bubbles still hanging on the board, as circles for the aim tracer. */
+  circles(): BubbleCircle[] {
+    return this.bubbles().map((b) => ({ ...this.centerOf(b.row, b.col), row: b.row, col: b.col }));
+  }
+
+  /* --------------------------------------------------------------- levels */
+
+  startLevel(level: number): void {
+    this.level = Math.max(1, Math.floor(level));
+    this.cfg = levelConfig(this.level);
+    this.topRow = 0;
+    this.grid.clear();
+    this.falling = [];
+    this.flying = null;
     this.combo = 0;
-    this.comboTimer = 0;
-    this.bestCombo = 0;
-    this.dangerTimer = 0;
-    this.time = 0;
-    this.slowMo = 0;
-    this.merges = 0;
-    this.absorbed = 0;
-    this.legendaries = 0;
-    this.dropCooldown = 0;
-    this.world.clear();
-    this.events.length = 0;
-    this.current = this.rollBubble();
-    this.next = this.rollBubble();
-    this.dropX = this.world.width / 2;
+    this.shots = 0;
+    this.angle = 0;
+    this.generate(this.cfg);
+    this.current = this.pickColor();
+    this.next = this.pickColor();
+    this.shotsUntilRow = this.cfg.dropEvery;
+    this.phase = 'ready';
   }
 
-  pause(): void {
-    if (this.state === 'playing') this.state = 'paused';
+  nextLevel(): void {
+    this.startLevel(this.level + 1);
   }
 
-  resume(): void {
-    if (this.state === 'paused') this.state = 'playing';
+  private generate(cfg: LevelConfig): void {
+    const placed: Bubble[] = [];
+    for (let row = 0; row < cfg.rows; row++) {
+      for (let col = 0; col < colsInRow(row); col++) {
+        let color = this.rng.pick(cfg.colors);
+        for (let tries = 0; tries < 14; tries++) {
+          const candidate = this.rng.pick(cfg.colors);
+          placed.push({ row, col, color: candidate });
+          const opensCluster = findCluster(gridView(placed), { row, col }).length >= 3;
+          placed.pop();
+          if (!opensCluster) {
+            color = candidate;
+            break;
+          }
+        }
+        placed.push({ row, col, color });
+      }
+    }
+    for (const b of placed) this.grid.set(cellKey(b.row, b.col), b);
   }
 
-  toMenu(): void {
-    this.state = 'idle';
-    this.world.clear();
-    this.current = null;
-    this.next = null;
+  /** Only colours still on the board are handed to the cannon. */
+  private pickColor(): ColorId {
+    const alive = new Set<ColorId>();
+    for (const b of this.grid.values()) alive.add(b.color);
+    if (alive.size === 0) return this.rng.pick(this.cfg.colors);
+    return this.rng.pick([...alive]);
   }
 
-  setWorldHeight(height: number): void {
-    this.world.setSize(this.world.width, height);
-    this.dropX = clamp(this.dropX, 0, this.world.width);
+  /** Loads a hand-made board (tests, and future hand-designed stages). */
+  loadBoard(
+    cells: Array<{ row: number; col: number; color: ColorId }>,
+    opts: { topRow?: number; current?: ColorId; next?: ColorId; dropEvery?: number } = {},
+  ): void {
+    this.grid.clear();
+    for (const c of cells) this.grid.set(cellKey(c.row, c.col), { ...c });
+    this.topRow = opts.topRow ?? 0;
+    this.current = opts.current ?? cells[0]?.color ?? 'violet';
+    this.next = opts.next ?? this.current;
+    this.shotsUntilRow = opts.dropEvery ?? this.cfg.dropEvery;
+    this.phase = this.grid.size === 0 ? 'cleared' : 'ready';
+    this.flying = null;
+    this.falling = [];
+    this.combo = 0;
+    this.events = [];
   }
 
-  /** The HUD height differs per device, so the line and the held bubble move with it. */
-  setLayout(dangerY: number, holdY: number): void {
-    this.dangerY = clamp(dangerY, 120, this.world.height * 0.4);
-    this.holdY = clamp(holdY, 60, this.world.height * 0.5);
+  /* ------------------------------------------------------------------ aim */
+
+  setAngle(angle: number): void {
+    this.angle = clampAngle(angle);
   }
 
-  setBest(best: number): void {
-    this.best = best;
+  /** Traced path (and the cell it would land in) for the dotted guide. */
+  aim(): { trace: TraceResult; cell: Cell | null } {
+    const trace = traceShot({
+      from: { x: this.launcherX, y: this.launcherY },
+      angle: this.angle,
+      ceilingY: this.ceilingY,
+      bubbles: this.circles(),
+    });
+    return { trace, cell: this.landingCell(trace) };
   }
 
-  /* --------------------------------------------------------------- input */
+  /* ----------------------------------------------------------------- fire */
 
-  setPointer(x: number): void {
-    this.dropX = clamp(x, 0, this.world.width);
+  fire(): void {
+    if (this.phase !== 'ready') return;
+    const { trace } = this.aim();
+    const color = this.current;
+    this.flying = { color, trace, travel: 0, bouncesPlayed: 0 };
+    this.current = this.next;
+    this.next = this.pickColor();
+    this.shots += 1;
+    this.phase = 'flying';
+    this.events.push({ type: 'shoot', color });
   }
 
-  /** X where the held bubble would be released. */
-  heldX(): number {
-    const def = this.current;
-    if (!def) return this.dropX;
-    return clamp(this.dropX, def.radius + 2, this.world.width - def.radius - 2);
+  swap(): void {
+    if (this.phase !== 'ready') return;
+    const tmp = this.current;
+    this.current = this.next;
+    this.next = tmp;
+    this.events.push({ type: 'swap' });
   }
 
-  drop(): boolean {
-    if (this.state !== 'playing' || !this.current || this.dropCooldown > 0) return false;
-    const def = this.current;
-    const x = this.heldX();
-    const bubble = this.spawn(def, x, this.holdY, 0, DROP_SPEED);
-    this.events.push({ type: 'drop', def, x, y: bubble.y });
-    this.current = this.next ?? this.rollBubble();
-    this.next = this.rollBubble();
-    this.dropCooldown = DROP_COOLDOWN;
-    return true;
+  /* --------------------------------------------------------------- update */
+
+  update(dt: number): void {
+    const step = Math.min(0.05, Math.max(0, dt));
+    for (const f of this.falling) {
+      f.vy += GRAVITY * step;
+      f.x += f.vx * step;
+      f.y += f.vy * step;
+      f.rot += f.spin * step;
+      f.life -= step;
+    }
+    this.falling = this.falling.filter((f) => f.life > 0 && f.y < this.height + 160);
+
+    const shot = this.flying;
+    if (!shot) return;
+    shot.travel += SHOT_SPEED * step;
+    while (shot.bouncesPlayed < shot.trace.bounceLengths.length && shot.travel >= shot.trace.bounceLengths[shot.bouncesPlayed]) {
+      shot.bouncesPlayed += 1;
+      this.events.push({ type: 'wall' });
+    }
+    if (shot.travel >= shot.trace.length) this.land(shot);
   }
 
-  /* ------------------------------------------------------------ stepping */
+  position(): { x: number; y: number } | null {
+    if (!this.flying) return null;
+    return pointAtDistance(this.flying.trace.points, this.flying.travel);
+  }
 
-  step(ms: number): void {
-    if (this.state !== 'playing') return;
-    const real = clamp(ms, 0, 64) / 1000;
-    this.time += real;
-    if (this.dropCooldown > 0) this.dropCooldown = Math.max(0, this.dropCooldown - real);
+  /** The nearest empty cell a shot at `trace` would settle into. */
+  landingCell(trace: TraceResult): Cell | null {
+    const free = (row: number, col: number) => inBounds(row, col) && !this.grid.has(cellKey(row, col));
+    const point = trace.hit;
+    const candidates: Cell[] = [];
 
-    let dt = real;
-    if (this.slowMo > 0) {
-      this.slowMo = Math.max(0, this.slowMo - real);
-      dt = real * 0.28;
+    if (trace.hitBubble) {
+      for (const [row, col] of neighbors(trace.hitBubble.row, trace.hitBubble.col)) {
+        if (row >= this.topRow && free(row, col)) candidates.push({ row, col });
+      }
+    }
+    if (trace.ceiling && trace.hitBubble === null) {
+      const snapped = cellFromPoint(trace.hit.x, trace.hit.y, this.topRow, this.ceilingY);
+      for (const col of [snapped.col, snapped.col - 1, snapped.col + 1]) {
+        if (col >= 0 && col < colsInRow(this.topRow) && free(this.topRow, col)) {
+          candidates.push({ row: this.topRow, col });
+        }
+      }
+    }
+    if (candidates.length === 0) return null;
+
+    let best = candidates[0];
+    let bestDist = Number.POSITIVE_INFINITY;
+    for (const c of candidates) {
+      if (c.row < this.topRow) continue;
+      const center = this.centerOf(c.row, c.col);
+      const d = Math.hypot(center.x - point.x, center.y - point.y);
+      if (d < bestDist) {
+        bestDist = d;
+        best = c;
+      }
+    }
+    return best;
+  }
+
+  private fallbackCell(trace: TraceResult): Cell | null {
+    const point = trace.hit;
+    let best: Cell | null = null;
+    let bestDist = Number.POSITIVE_INFINITY;
+    for (let row = this.topRow; row <= this.topRow + 40; row++) {
+      for (let col = 0; col < colsInRow(row); col++) {
+        if (this.grid.has(cellKey(row, col))) continue;
+        const center = this.centerOf(row, col);
+        const d = Math.hypot(center.x - point.x, center.y - point.y);
+        if (d < bestDist) {
+          bestDist = d;
+          best = { row, col };
+        }
+      }
+    }
+    return best;
+  }
+
+  private land(shot: FlyingShot): void {
+    const cell = this.landingCell(shot.trace) ?? this.fallbackCell(shot.trace);
+    this.flying = null;
+    this.phase = 'ready';
+    if (!cell || cell.row < this.topRow) {
+      this.resolveShotEnd();
+      return;
     }
 
-    this.world.step(dt);
-    this.resolveMerges();
-    this.compact();
-    this.updateCombo(real);
-    this.updateDanger(real);
-    this.updateTrophies();
-  }
+    this.grid.set(cellKey(cell.row, cell.col), { row: cell.row, col: cell.col, color: shot.color });
+    const cluster = findCluster(gridView(this.grid.values()), cell);
 
-  private updateCombo(dt: number): void {
-    if (this.combo <= 0) return;
-    this.comboTimer -= dt;
-    if (this.comboTimer <= 0) {
+    if (cluster.length >= 3) {
+      this.popCluster(cluster, shot.color);
+    } else {
       this.combo = 0;
-      this.comboTimer = 0;
+      this.events.push({ type: 'miss' });
     }
+
+    this.resolveShotEnd();
   }
 
-  private updateDanger(dt: number): void {
-    let over = false;
-    for (const b of this.world.bodies) {
-      if (!b.alive) continue;
-      if (this.time - b.bornAt < 1) continue;
-      if (b.y - b.r < this.dangerY) {
-        over = true;
-        break;
-      }
-    }
-    if (over) this.dangerTimer += dt;
-    else this.dangerTimer = Math.max(0, this.dangerTimer - dt * 1.6);
-
-    if (this.dangerTimer >= DANGER_SECONDS) this.gameOver();
-  }
-
-  private updateTrophies(): void {
-    if (this.score >= 2000) this.discover('komi-hanbok');
-    if (this.legendaries > 0) this.discover('komi-gold');
-  }
-
-  gameOver(): void {
-    if (this.state === 'over') return;
-    this.state = 'over';
-    const isBest = this.score > this.best;
-    if (isBest) this.best = this.score;
-    this.events.push({ type: 'gameover', score: this.score, best: isBest });
-  }
-
-  /* -------------------------------------------------------------- merges */
-
-  private resolveMerges(): void {
-    const bodies = this.world.bodies;
-    const used = new Set<number>();
-    for (let i = 0; i < bodies.length; i++) {
-      const a = bodies[i];
-      if (!a.alive || used.has(a.id)) continue;
-      for (let j = i + 1; j < bodies.length; j++) {
-        if (!a.alive) break;
-        const b = bodies[j];
-        if (!b.alive || used.has(b.id) || a.id === b.id) continue;
-        if (this.time < a.mergeReadyAt || this.time < b.mergeReadyAt) continue;
-        const rule = mergeRule(a.def, b.def);
-        if (!rule) continue;
-        const dx = b.x - a.x;
-        const dy = b.y - a.y;
-        // Touching is enough: the solver separates overlaps before this pass,
-        // so a strict "must overlap" test would never fire.
-        const reach = (a.r + b.r) * 1.004;
-        if (dx * dx + dy * dy > reach * reach) continue;
-        used.add(a.id);
-        used.add(b.id);
-        this.applyMerge(a, b, rule);
-        if (!a.alive) break;
-      }
-    }
-  }
-
-  private applyMerge(a: GameBubble, b: GameBubble, rule: ReturnType<typeof mergeRule>): void {
-    if (!rule) return;
-    const midX = (a.x + b.x) / 2;
-    const midY = (a.y + b.y) / 2;
-    const vx = (a.vx + b.vx) / 2;
-    const vy = (a.vy + b.vy) / 2;
-
-    this.combo = Math.min(MAX_COMBO, this.combo + 1);
-    this.comboTimer = COMBO_WINDOW;
+  private popCluster(cluster: Cell[], color: ColorId): void {
+    const center = this.centerOf(cluster[0].row, cluster[0].col);
+    for (const c of cluster) this.grid.delete(cellKey(c.row, c.col));
+    this.combo += 1;
     this.bestCombo = Math.max(this.bestCombo, this.combo);
-    const multiplier = 1 + (this.combo - 1) * 0.2;
-
-    if (rule.kind === 'evolve' && rule.into) {
-      this.removeBody(a.id);
-      this.removeBody(b.id);
-      const created = this.spawn(rule.into, midX, midY, vx, vy);
-      created.mergeReadyAt = this.time + 0.1;
-      const points = Math.round(rule.into.score * multiplier);
-      this.score += points;
-      this.merges += 1;
-      this.events.push({ type: 'merge', def: rule.into, x: midX, y: midY, combo: this.combo, points });
-      if (this.combo >= 3) this.events.push({ type: 'combo', value: this.combo, x: midX, y: midY });
-      return;
-    }
-
-    if (rule.kind === 'legend' && rule.into) {
-      this.removeBody(a.id);
-      this.removeBody(b.id);
-      const created = this.spawn(rule.into, midX, midY, vx, vy);
-      created.mergeReadyAt = this.time + 0.35;
-      const points = Math.round(rule.into.score * multiplier);
-      this.score += points;
-      this.merges += 1;
-      this.legendaries += 1;
-      this.slowMo = 1.8;
-      this.events.push({ type: 'legendary', def: rule.into, x: midX, y: midY, points });
-      this.discover('komi-gold');
-      return;
-    }
-
-    // absorb: one of the two survives, the touch only pays a bonus
-    const keep = a.mass >= b.mass ? a : b;
-    const gone = keep === a ? b : a;
-    this.removeBody(gone.id);
-    keep.mergeReadyAt = this.time + 0.3;
-    keep.vx = vx * 0.5;
-    keep.vy = vy * 0.5;
-    const bonus = rule.bonus ?? 50;
-    const points = Math.round(bonus * multiplier);
+    const mult = comboMultiplier(this.combo);
+    const points = Math.round((POP_BASE * cluster.length + POP_EXTRA * Math.max(0, cluster.length - 3)) * mult);
     this.score += points;
-    this.absorbed += 1;
-    this.events.push({ type: 'absorb', def: keep.def, x: midX, y: midY, points });
+    this.events.push({ type: 'pop', cells: cluster, color, points, combo: this.combo, at: center });
+
+    const floating = findFloating(gridView(this.grid.values()), this.topRow);
+    if (floating.length > 0) {
+      const first = this.centerOf(floating[0].row, floating[0].col);
+      for (const c of floating) {
+        const bubble = this.grid.get(cellKey(c.row, c.col));
+        this.grid.delete(cellKey(c.row, c.col));
+        if (!bubble) continue;
+        const p = this.centerOf(c.row, c.col);
+        this.falling.push({
+          color: bubble.color,
+          x: p.x,
+          y: p.y,
+          vx: (this.rng.next() - 0.5) * 150,
+          vy: -120 - this.rng.next() * 90,
+          rot: 0,
+          spin: (this.rng.next() - 0.5) * 6,
+          life: 2.4,
+        });
+      }
+      const dropPoints = Math.round(DROP_POINTS * floating.length * mult);
+      this.score += dropPoints;
+      this.events.push({ type: 'drop', count: floating.length, points: dropPoints, at: first });
+    }
   }
 
-  /* ------------------------------------------------------------- bubbles */
-
-  /** Marks a bubble for removal; the array is compacted once per frame. */
-  private removeBody(id: number): void {
-    const body = this.world.bodies.find((b) => b.id === id);
-    if (body) body.alive = false;
+  private resolveShotEnd(): void {
+    this.shotsUntilRow -= 1;
+    if (this.grid.size === 0) {
+      const bonus = CLEAR_BONUS * this.level;
+      this.score += bonus;
+      this.phase = 'cleared';
+      this.events.push({ type: 'clear', level: this.level, bonus });
+      return;
+    }
+    if (this.shotsUntilRow <= 0) this.dropRow();
+    this.checkDeadline();
   }
 
-  /** Drops every dead bubble from the physics list (never during a pair scan). */
-  private compact(): void {
-    const list = this.world.bodies;
-    for (let i = list.length - 1; i >= 0; i--) if (!list[i].alive) list.splice(i, 1);
+  dropRow(): void {
+    this.topRow -= 1;
+    for (let col = 0; col < colsInRow(this.topRow); col++) {
+      this.grid.set(cellKey(this.topRow, col), {
+        row: this.topRow,
+        col,
+        color: this.pickColor(),
+      });
+    }
+    this.shotsUntilRow = this.cfg.dropEvery;
+    this.events.push({ type: 'row' });
   }
 
-  private spawn(def: BubbleDef, x: number, y: number, vx: number, vy: number, grace = 0.12): GameBubble {
-    const body: GameBubble = {
-      id: this.world.nextBodyId(),
-      def,
-      x: clamp(x, def.radius, this.world.width - def.radius),
-      y,
-      vx,
-      vy,
-      r: def.radius,
-      mass: def.radius * def.radius,
-      alive: true,
-      bornAt: this.time,
-      mergeReadyAt: this.time + grace,
-    };
-    this.world.add(body);
-    this.discover(def.id);
-    return body;
+  /** True when any bubble hangs past the danger line. */
+  overLine(): boolean {
+    for (const b of this.grid.values()) {
+      if (this.centerOf(b.row, b.col).y + BUBBLE_RADIUS > this.deadlineY) return true;
+    }
+    return false;
   }
 
-  /** Test / debug hook: place a bubble that may merge immediately. */
-  place(id: string, x: number, y: number, vy = 0): GameBubble {
-    const def = this.defFor(id);
-    return this.spawn(def, x, y, 0, vy, 0);
+  /** How close the lowest bubble is to the line, 0 (safe) .. 1 (touching). */
+  pressure(): number {
+    let lowest = -Infinity;
+    for (const b of this.grid.values()) lowest = Math.max(lowest, this.centerOf(b.row, b.col).y);
+    if (!Number.isFinite(lowest)) return 0;
+    const line = this.deadlineY - BUBBLE_RADIUS;
+    const start = line - 260;
+    return Math.max(0, Math.min(1, (lowest - start) / (line - start)));
   }
 
-  private defFor(id: string): BubbleDef {
-    return defById(id);
+  private checkDeadline(): void {
+    if (this.grid.size === 0) return;
+    if (this.overLine()) {
+      this.phase = 'over';
+      this.events.push({ type: 'over' });
+    }
   }
 
-  private rollBubble(): BubbleDef {
-    const useLevel2 = this.rng.next() < this.level2Chance;
-    const line = this.rng.next() < 0.5 ? MOMO_LINE : KOMI_LINE;
-    const def = useLevel2 ? line[1] : line[0];
-    this.discover(def.id);
-    return def;
-  }
-
-  private discover(id: string): void {
-    if (this.discovered.has(id)) return;
-    this.discovered.add(id);
-    this.events.push({ type: 'discover', id });
-  }
-
-  /* ------------------------------------------------------------- helpers */
-
-  drainEvents(): GameEvent[] {
-    if (this.events.length === 0) return [];
-    const out = this.events.slice();
-    this.events.length = 0;
+  takeEvents(): GameEvent[] {
+    const out = this.events;
+    this.events = [];
     return out;
-  }
-
-  dangerRatio(): number {
-    return clamp(this.dangerTimer / DANGER_SECONDS, 0, 1);
-  }
-
-  liveBubbles(): GameBubble[] {
-    return this.world.bodies.filter((b) => b.alive);
   }
 }

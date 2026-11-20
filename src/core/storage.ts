@@ -1,5 +1,4 @@
 import type { Lang } from './types';
-import { COLLECTION_ORDER } from './config';
 
 export interface Settings {
   sfx: boolean;
@@ -8,13 +7,12 @@ export interface Settings {
 }
 
 export interface SaveData {
-  version: 1;
+  version: 2;
   best: number;
-  discovered: string[];
-  /** Bubbles found but not yet seen in the collection (NEW badge). */
-  unseen: string[];
-  settings: Settings;
+  /** Highest stage reached, so the menu can offer "continue". */
+  level: number;
   runs: number;
+  settings: Settings;
 }
 
 export interface Store {
@@ -22,35 +20,32 @@ export interface Store {
   setItem(key: string, value: string): void;
 }
 
-export const SAVE_KEY = 'kmb.save.v1';
+export const SAVE_KEY = 'kmb.save.v2';
 
-export const DEFAULT_SETTINGS: Settings = { sfx: true, bgm: true, lang: 'en' };
+export function defaultLang(): Lang {
+  try {
+    const nav = typeof navigator !== 'undefined' ? navigator.language : '';
+    return nav.toLowerCase().startsWith('ko') ? 'ko' : 'en';
+  } catch {
+    return 'en';
+  }
+}
 
 export function defaultSave(): SaveData {
   return {
-    version: 1,
+    version: 2,
     best: 0,
-    discovered: [],
-    unseen: [],
-    settings: { ...DEFAULT_SETTINGS },
+    level: 1,
     runs: 0,
+    settings: { sfx: true, bgm: true, lang: defaultLang() },
   };
-}
-
-const known = new Set(COLLECTION_ORDER);
-
-function cleanIds(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  const out: string[] = [];
-  for (const v of value) if (typeof v === 'string' && known.has(v) && !out.includes(v)) out.push(v);
-  return out;
 }
 
 function cleanNumber(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
 }
 
-/** Parses a save file, tolerating missing / damaged / older fields. */
+/** Parses a save file, tolerating missing, damaged or older fields. */
 export function parseSave(raw: string | null): SaveData {
   const base = defaultSave();
   if (!raw) return base;
@@ -65,16 +60,15 @@ export function parseSave(raw: string | null): SaveData {
   const settings = (obj.settings ?? {}) as Record<string, unknown>;
   const lang = settings.lang === 'ko' ? 'ko' : settings.lang === 'en' ? 'en' : base.settings.lang;
   return {
-    version: 1,
+    version: 2,
     best: cleanNumber(obj.best),
-    discovered: cleanIds(obj.discovered),
-    unseen: cleanIds(obj.unseen).filter((id) => cleanIds(obj.discovered).includes(id)),
+    level: Math.max(1, cleanNumber(obj.level) || 1),
+    runs: cleanNumber(obj.runs),
     settings: {
       sfx: typeof settings.sfx === 'boolean' ? settings.sfx : base.settings.sfx,
       bgm: typeof settings.bgm === 'boolean' ? settings.bgm : base.settings.bgm,
       lang,
     },
-    runs: Math.max(0, Math.floor(typeof obj.runs === 'number' && Number.isFinite(obj.runs) ? obj.runs : 0)),
   };
 }
 
@@ -94,30 +88,21 @@ export function writeSave(store: Store, data: SaveData): void {
   }
 }
 
-/** Merges a run's best score and discoveries into the save file (no run counter). */
-export function mergeProgress(save: SaveData, score: number, discovered: Iterable<string>): SaveData {
-  const merged = new Set(save.discovered);
-  const unseen = new Set(save.unseen);
-  for (const id of discovered) {
-    if (!known.has(id)) continue;
-    if (!merged.has(id)) {
-      merged.add(id);
-      unseen.add(id);
-    }
-  }
+/** Records a finished run: best score and the furthest stage reached. */
+export function recordRun(save: SaveData, score: number, level: number): SaveData {
   return {
     ...save,
     best: Math.max(save.best, Math.floor(score)),
-    discovered: COLLECTION_ORDER.filter((id) => merged.has(id)),
-    unseen: COLLECTION_ORDER.filter((id) => unseen.has(id)),
+    level: Math.max(save.level, Math.floor(level)),
+    runs: save.runs + 1,
   };
 }
 
-/** Merges a finished run into the save file. Returns the new save. */
-export function commitRun(save: SaveData, score: number, discovered: Iterable<string>): SaveData {
-  return { ...mergeProgress(save, score, discovered), runs: save.runs + 1 };
-}
-
-export function markSeen(save: SaveData): SaveData {
-  return save.unseen.length === 0 ? save : { ...save, unseen: [] };
+/** Saves progress in the middle of a run (leaving the tab, pausing). */
+export function rememberLevel(save: SaveData, score: number, level: number): SaveData {
+  return {
+    ...save,
+    best: Math.max(save.best, Math.floor(score)),
+    level: Math.max(save.level, Math.floor(level)),
+  };
 }

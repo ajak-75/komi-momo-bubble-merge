@@ -38,11 +38,11 @@ export class AudioEngine {
       this.master.connect(ctx.destination);
 
       this.sfxBus = ctx.createGain();
-      this.sfxBus.gain.value = this.sfxEnabled ? 0.55 : 0;
+      this.sfxBus.gain.value = this.sfxEnabled ? 0.6 : 0;
       this.sfxBus.connect(this.master);
 
       this.bgmBus = ctx.createGain();
-      this.bgmBus.gain.value = this.bgmEnabled ? 0.16 : 0;
+      this.bgmBus.gain.value = this.bgmEnabled ? 0.14 : 0;
       this.bgmBus.connect(this.master);
 
       this.ready = true;
@@ -54,12 +54,12 @@ export class AudioEngine {
 
   setSfx(on: boolean): void {
     this.sfxEnabled = on;
-    if (this.sfxBus && this.ctx) this.sfxBus.gain.setTargetAtTime(on ? 0.55 : 0, this.ctx.currentTime, 0.03);
+    if (this.sfxBus && this.ctx) this.sfxBus.gain.setTargetAtTime(on ? 0.6 : 0, this.ctx.currentTime, 0.03);
   }
 
   setBgm(on: boolean): void {
     this.bgmEnabled = on;
-    if (this.bgmBus && this.ctx) this.bgmBus.gain.setTargetAtTime(on ? 0.16 : 0, this.ctx.currentTime, 0.2);
+    if (this.bgmBus && this.ctx) this.bgmBus.gain.setTargetAtTime(on ? 0.14 : 0, this.ctx.currentTime, 0.2);
     if (on) this.startBgm();
     else this.stopBgm();
   }
@@ -109,70 +109,74 @@ export class AudioEngine {
     src.buffer = buffer;
     const filter = ctx.createBiquadFilter();
     filter.type = 'highpass';
-    filter.frequency.value = 2200;
+    filter.frequency.value = 1800;
     const gain = ctx.createGain();
     gain.gain.value = gainValue;
     src.connect(filter).connect(gain).connect(this.sfxBus);
     src.start(start);
   }
 
-  playDrop(): void {
-    this.tone({ freq: note(-17), dur: 0.12, type: 'sine', gain: 0.22, glideTo: note(-29) });
+  /* ------------------------------------------------------------------ sfx */
+
+  playShoot(): void {
+    this.tone({ freq: note(-9), dur: 0.1, type: 'triangle', gain: 0.2, glideTo: note(3) });
   }
 
-  playMerge(level: number, combo: number): void {
-    const base = [-5, 0, 4, 7][Math.min(3, Math.max(0, level - 2))] ?? 0;
-    const pitch = base + Math.min(7, combo) * 0.6;
-    this.tone({ freq: note(pitch), dur: 0.16, type: 'triangle', gain: 0.3, glideTo: note(pitch + 5) });
-    this.tone({ freq: note(pitch + 12), dur: 0.1, type: 'sine', gain: 0.12 });
-    this.noise(0.08, 0.06);
+  playBounce(): void {
+    this.tone({ freq: note(-5), dur: 0.07, type: 'square', gain: 0.08, glideTo: note(-1) });
   }
 
-  playAbsorb(): void {
-    this.tone({ freq: note(7), dur: 0.22, type: 'triangle', gain: 0.25, glideTo: note(14) });
-  }
-
-  playCombo(combo: number): void {
-    const steps = [0, 2, 4, 7, 9, 12, 14, 16];
-    const s = steps[Math.min(steps.length - 1, combo - 3)] ?? 0;
-    this.tone({ freq: note(s + 12), dur: 0.18, type: 'sine', gain: 0.16 });
-  }
-
-  playLegendary(): void {
-    const ctx = this.ctx;
-    if (!ctx) return;
+  /** A pop that climbs with the combo, like beads clicking into place. */
+  playPop(combo: number, size = 3): void {
+    const steps = [0, 3, 5, 7, 10, 12, 15, 17];
+    const base = steps[Math.min(steps.length - 1, Math.max(0, combo - 1))] ?? 0;
     const start = this.now();
-    const chords = [0, 4, 7, 12, 16, 19, 24];
-    chords.forEach((semi, i) => {
-      this.tone({
-        freq: note(semi + 3),
-        dur: 0.9,
-        when: start + i * 0.07,
-        type: 'triangle',
-        gain: 0.22,
-      });
-      this.tone({ freq: note(semi + 15), dur: 0.7, when: start + i * 0.07, type: 'sine', gain: 0.1 });
-    });
-    this.tone({ freq: note(-24), dur: 1.4, when: start, type: 'sine', gain: 0.28, attack: 0.05 });
-    for (let i = 0; i < 5; i++) {
-      this.noise(0.5, 0.05, start + 0.2 + i * 0.12);
+    this.tone({ freq: note(base - 5), dur: 0.16, type: 'triangle', gain: 0.26, glideTo: note(base + 7) });
+    this.tone({ freq: note(base + 12), dur: 0.12, when: start + 0.02, type: 'sine', gain: 0.12 });
+    this.noise(0.1, 0.07);
+    for (let i = 1; i < Math.min(6, size); i++) {
+      this.tone({ freq: note(base + 7 + i * 2), dur: 0.1, when: start + i * 0.035, type: 'sine', gain: 0.08 });
     }
+  }
+
+  playDrop(count: number): void {
+    const start = this.now();
+    const ticks = Math.min(8, Math.max(2, count));
+    for (let i = 0; i < ticks; i++) {
+      this.tone({
+        freq: note(7 - i * 3),
+        dur: 0.12,
+        when: start + i * 0.055,
+        type: 'sine',
+        gain: 0.1,
+      });
+    }
+  }
+
+  playRow(): void {
+    const start = this.now();
+    this.tone({ freq: note(-17), dur: 0.24, type: 'sawtooth', gain: 0.14, glideTo: note(-24) });
+    this.noise(0.16, 0.05, start);
+  }
+
+  playClear(): void {
+    const start = this.now();
+    [0, 4, 7, 12, 16, 19].forEach((semi, i) => {
+      this.tone({ freq: note(semi + 3), dur: 0.5, when: start + i * 0.075, type: 'triangle', gain: 0.2 });
+      this.tone({ freq: note(semi + 15), dur: 0.4, when: start + i * 0.075, type: 'sine', gain: 0.08 });
+    });
+    this.noise(0.5, 0.05, start + 0.1);
   }
 
   playGameOver(): void {
     const start = this.now();
     [0, -3, -7, -12].forEach((semi, i) => {
-      this.tone({ freq: note(semi), dur: 0.4, when: start + i * 0.16, type: 'triangle', gain: 0.22 });
+      this.tone({ freq: note(semi), dur: 0.42, when: start + i * 0.17, type: 'triangle', gain: 0.22 });
     });
   }
 
   playUi(): void {
-    this.tone({ freq: note(12), dur: 0.06, type: 'sine', gain: 0.15 });
-  }
-
-  playDiscover(): void {
-    this.tone({ freq: note(16), dur: 0.3, type: 'sine', gain: 0.14 });
-    this.tone({ freq: note(21), dur: 0.4, when: this.now() + 0.08, type: 'sine', gain: 0.11 });
+    this.tone({ freq: note(12), dur: 0.06, type: 'sine', gain: 0.14 });
   }
 
   /* ------------------------------------------------------------------ bgm */

@@ -1,14 +1,14 @@
 <!doctype html>
-<html lang="en">
+<html lang="ko">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
-    <title>KOMI &amp; MOMO BUBBLE MERGE</title>
+    <title>KOMI &amp; MOMO BUBBLE SHOOTER</title>
     <meta
       name="description"
-      content="Merge paw bubbles into MOMO, flower bubbles into KOMI, crown both royal lines and fuse the LEGENDARY KOMI & MOMO bubble. A cozy browser merge puzzle by Ajak Studio."
+      content="코미와 모모를 대포로 쏘아 같은 버블 3개를 터뜨리는 클래식 버블 슈터. 벽에 튕기는 조준선, 매칭 폭발, 낙하 보너스, 스테이지 무한 진행. Ajak Studio의 무료 웹게임."
     />
-    <meta name="theme-color" content="#101226" />
+    <meta name="theme-color" content="#0d0820" />
     <meta name="color-scheme" content="dark" />
     <meta name="referrer" content="strict-origin-when-cross-origin" />
     <meta
@@ -18,100 +18,96 @@
 
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Ajak Studio" />
-    <meta property="og:title" content="KOMI &amp; MOMO BUBBLE MERGE" />
+    <meta property="og:title" content="KOMI &amp; MOMO BUBBLE SHOOTER" />
     <meta
       property="og:description"
-      content="발바닥은 모모, 꽃은 코미. 두 왕가의 버블을 합쳐 레전더리를 만드는 캐주얼 합치기 퍼즐."
+      content="코미와 모모를 대포로 쏘아 같은 버블 3개를 터뜨리는 클래식 버블 슈터. 벽 반사 조준선, 매칭 폭발, 낙하 보너스."
     />
     <meta property="og:url" content="https://ajak-75.github.io/komi-momo-bubble-merge/" />
     <meta property="og:image" content="https://ajak-75.github.io/komi-momo-bubble-merge/assets/og-cover.jpg" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="KOMI &amp; MOMO BUBBLE MERGE" />
+    <meta name="twitter:title" content="KOMI &amp; MOMO BUBBLE SHOOTER" />
     <meta name="twitter:image" content="https://ajak-75.github.io/komi-momo-bubble-merge/assets/og-cover.jpg" />
 
     <link rel="manifest" href="./manifest.webmanifest" />
     <link rel="icon" href="./favicon-32.png" sizes="32x32" type="image/png" />
     <link rel="icon" href="./icon-192.png" sizes="192x192" type="image/png" />
     <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
-    <script type="module" crossorigin src="./build/index-Bq4buPJn.js"></script>
-    <link rel="stylesheet" crossorigin href="./build/index-DGah8bGW.css">
+    <script type="module" crossorigin src="./build/index-BHddfcet.js"></script>
   </head>
   <body>
     <div class="app">
-      <div class="stage">        <div class="board" id="board">
-          <canvas id="gameCanvas" aria-label="KOMI & MOMO bubble merge play field"></canvas>
-
-          <!-- ============================ game hud ============================ -->
+      <div class="stage">
+        <div class="board" id="board">
+          <!-- ================================ hud =============================== -->
           <header class="hud" id="hud">
-            <div class="hud-top">
-              <div class="score-box">
+            <div class="hud-row">
+              <div class="hud-stat">
                 <span class="hud-label" data-i18n="score">SCORE</span>
-                <strong id="scoreValue">0</strong>
-                <span class="hud-best"><span data-i18n="best">BEST</span> <b id="hudBest">0</b></span>
+                <b id="scoreValue">0</b>
               </div>
-              <div class="hud-right">
-                <div class="next-box">
-                  <span class="hud-label" data-i18n="next">NEXT</span>
-                  <img id="nextBubble" alt="" width="52" height="52" decoding="async" />
-                </div>
-                <button class="icon-btn" id="btnPause" type="button" data-i18n-aria="pause" aria-label="Pause">❚❚</button>
+              <div class="hud-stat hud-stage">
+                <span class="hud-label" data-i18n="stage">STAGE</span>
+                <b id="stageValue">1</b>
+              </div>
+              <div class="hud-stat hud-best">
+                <span class="hud-label" data-i18n="best">BEST</span>
+                <b id="hudBest">0</b>
+              </div>
+              <div class="hud-buttons">
+                <button class="icon-btn" id="btnSfx" type="button" aria-label="SFX">♪</button>
+                <button class="icon-btn" id="btnBgm" type="button" aria-label="MUSIC">♫</button>
+                <button class="icon-btn" id="btnPause" type="button" data-i18n-aria="pause" aria-label="Pause">❙❙</button>
               </div>
             </div>
-            <div class="hud-toggles">
-              <button class="chip mini" id="btnSfx" type="button">SFX</button>
-              <button class="chip mini" id="btnBgm" type="button">MUSIC</button>
-              <span class="chip mini static" id="comboChip">x1</span>
-            </div>
+            <div class="rowbar" aria-hidden="true"><i id="rowFill"></i></div>
           </header>
 
-          <div class="danger-badge" id="dangerBadge" data-i18n="danger">DANGER</div>
-          <div class="combo-pop" id="comboPop" aria-live="polite"></div>
-          <div class="toast" id="toast" aria-live="polite"></div>
+          <div class="field" id="field">
+            <canvas id="gameCanvas" aria-label="KOMI & MOMO bubble shooter play field"></canvas>
+          </div>
 
-          <!-- ============================== menu ============================= -->
-          <section class="screen menu-screen" id="screenMenu">
+          <!-- =============================== menu ============================== -->
+          <section class="overlay menu-screen" id="screenMenu">
             <div class="menu-top">
-              <button class="chip lang-btn" id="btnLangMenu" type="button" aria-label="Language">EN</button>
-              <button class="chip sound-btn" id="btnSoundMenu" type="button">
-                <span class="sound-ico" id="soundIcoMenu">♪</span>
-                <span id="soundLabelMenu" data-i18n="soundOn">SOUND ON</span>
+              <button class="chip" id="btnLang" type="button" data-i18n-aria="language" aria-label="Language">KO</button>
+              <button class="chip" id="btnSound" type="button">
+                <span class="chip-ico" id="soundIco">♪</span>
+                <span id="soundLabel" data-i18n="sfx">SFX</span>
               </button>
             </div>
 
             <div class="menu-hero">
-              <div class="hero-frame">
-                <img class="hero-art" src="./assets/hero-royal.jpg" alt="Royal KOMI & MOMO bubble" decoding="async" />
-                <span class="hero-spark spark-a"></span>
-                <span class="hero-spark spark-b"></span>
-                <span class="hero-spark spark-c"></span>
-              </div>
               <h1 class="logo">
                 <span class="logo-komi">KOMI</span><span class="logo-amp">&amp;</span><span class="logo-momo">MOMO</span>
               </h1>
-              <p class="logo-sub" data-i18n="subtitle">BUBBLE MERGE</p>
+              <p class="logo-sub" data-i18n="title">BUBBLE SHOOTER</p>
               <p class="tagline" data-i18n="tagline"></p>
+              <div class="bubble-strip" id="bubbleStrip" aria-hidden="true"></div>
             </div>
 
+            <ul class="howto">
+              <li><span>①</span><p data-i18n="howTo1"></p></li>
+              <li><span>②</span><p data-i18n="howTo2"></p></li>
+              <li><span>③</span><p data-i18n="howTo3"></p></li>
+              <li><span>④</span><p data-i18n="howTo4"></p></li>
+            </ul>
+
             <div class="menu-bottom">
-              <div class="best-chip">
-                <span data-i18n="best">BEST</span>
-                <b id="menuBest">0</b>
-              </div>
-              <button class="btn primary" id="btnPlay" type="button">
-                <span data-i18n="play">PLAY</span>
+              <div class="best-chip"><span data-i18n="best">BEST</span><b id="menuBest">0</b></div>
+              <button class="btn primary" id="btnPlay" type="button" data-i18n="play">PLAY</button>
+              <button class="btn ghost" id="btnContinue" type="button" hidden>
+                <span data-i18n="continueAt">CONTINUE</span>
+                <b id="continueStage">2</b>
               </button>
-              <button class="btn ghost" id="btnCollection" type="button">
-                <span data-i18n="collection">COLLECTION</span>
-                <b class="collection-count" id="menuCollectionCount">0/11</b>
-              </button>
-              <p class="about" data-i18n="about">Merge puzzle · Ajak Studio</p>
+              <p class="about" data-i18n="about"></p>
             </div>
           </section>
 
-          <!-- ============================= pause ============================ -->
-          <div class="overlay" id="screenPause" hidden>
+          <!-- ============================== pause ============================= -->
+          <div class="overlay center" id="screenPause" hidden>
             <div class="panel small">
               <h2 class="panel-title" data-i18n="paused">PAUSED</h2>
               <div class="panel-actions">
@@ -119,26 +115,27 @@
                 <button class="btn ghost" id="btnPauseRestart" type="button" data-i18n="restart">PLAY AGAIN</button>
                 <button class="btn ghost" id="btnPauseMenu" type="button" data-i18n="main">MAIN</button>
               </div>
-              <div class="sound-row">
-                <button class="chip" id="btnSfxPause" type="button">SFX</button>
-                <button class="chip" id="btnBgmPause" type="button">MUSIC</button>
+              <div class="toggle-row">
+                <button class="chip" id="btnSfxPause" type="button">♪ SFX</button>
+                <button class="chip" id="btnBgmPause" type="button">♫ MUSIC</button>
+                <button class="chip" id="btnLangPause" type="button">KO</button>
               </div>
             </div>
           </div>
 
-          <!-- =========================== game over ========================== -->
-          <div class="overlay" id="screenOver" hidden>
+          <!-- ============================ game over =========================== -->
+          <div class="overlay center" id="screenOver" hidden>
             <div class="panel">
-              <h2 class="panel-title gameover-title" data-i18n="gameOver">GAME OVER</h2>
+              <h2 class="panel-title over-title" data-i18n="gameOver">GAME OVER</h2>
               <p class="record-badge" id="recordBadge" hidden data-i18n="newRecord">NEW RECORD!</p>
               <div class="stat-grid">
                 <div class="stat">
-                  <span data-i18n="finalScore">FINAL SCORE</span>
+                  <span data-i18n="finalScore">SCORE</span>
                   <b id="finalScore">0</b>
                 </div>
                 <div class="stat">
-                  <span data-i18n="best">BEST</span>
-                  <b id="finalBest">0</b>
+                  <span data-i18n="reached">STAGE</span>
+                  <b id="finalStage">1</b>
                 </div>
               </div>
               <div class="panel-actions">
@@ -148,36 +145,33 @@
             </div>
           </div>
 
-          <!-- =========================== collection ========================= -->
-          <div class="overlay collection-overlay" id="screenCollection" hidden>
-            <div class="panel collection-panel">
-              <div class="collection-head">
-                <h2 class="panel-title" data-i18n="collectionTitle">COLLECTION</h2>
-                <span class="collection-progress" id="collectionProgress">0/11</span>
-                <button class="icon-btn close" id="btnCloseCollection" type="button" aria-label="Close">✕</button>
+          <!-- =========================== stage clear ========================== -->
+          <div class="overlay center clear-screen" id="screenClear" hidden>
+            <div class="panel">
+              <h2 class="panel-title clear-title" data-i18n="stageClear">STAGE CLEAR</h2>
+              <p class="clear-body" data-i18n="stageClearBody"></p>
+              <div class="stat-grid">
+                <div class="stat">
+                  <span data-i18n="score">SCORE</span>
+                  <b id="clearScore">0</b>
+                </div>
+                <div class="stat">
+                  <span data-i18n="bonus">BONUS</span>
+                  <b id="clearBonus">0</b>
+                </div>
               </div>
-              <h3 class="section-title" data-i18n="evolution">EVOLUTION</h3>
-              <div class="collection-grid" id="collectionGrid"></div>
-              <h3 class="section-title" data-i18n="special">SPECIAL</h3>
-              <div class="collection-grid" id="collectionSpecials"></div>
-              <button class="chip reset-btn" id="btnReset" type="button" data-i18n="reset">RESET DATA</button>
+              <div class="panel-actions">
+                <button class="btn primary" id="btnNextStage" type="button" data-i18n="nextStage">NEXT STAGE</button>
+                <button class="btn ghost" id="btnClearMenu" type="button" data-i18n="main">MAIN</button>
+              </div>
             </div>
           </div>
 
-          <!-- =========================== legendary ========================== -->
-          <div class="legend-overlay" id="screenLegend" hidden>
-            <div class="legend-inner">
-              <div class="legend-glow"></div>
-              <h2 class="legend-title" data-i18n="legendary">LEGENDARY!</h2>
-              <p class="legend-sub" data-i18n="legendarySub">KOMI ROYAL + MOMO ROYAL</p>
-              <img class="legend-art" src="./assets/bubbles/legendary.webp" alt="Legendary bubble" />
-              <p class="legend-body" data-i18n="legendaryBody"></p>
-              <p class="legend-bonus"><span data-i18n="bonus">BONUS</span> <b id="legendBonus">+150</b></p>
-            </div>
-          </div>
+          <div class="toast" id="toast" aria-live="polite"></div>
         </div>
       </div>
     </div>
+
     <div class="rotate-hint" id="rotateHint">
       <span class="rotate-ico">⟳</span>
       <p data-i18n="rotate">Rotate your phone to portrait</p>
