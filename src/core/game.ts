@@ -55,6 +55,10 @@ export class BubbleMergeGame {
   absorbed = 0;
   legendaries = 0;
   dropCooldown = 0;
+  /** Y of the game-over line in world units (the app moves it under the HUD). */
+  dangerY = DANGER_Y;
+  /** Y where the held bubble waits before a drop. */
+  holdY = DROP_Y;
   private rng: Rng;
   private level2Chance: number;
 
@@ -111,6 +115,12 @@ export class BubbleMergeGame {
     this.dropX = clamp(this.dropX, 0, this.world.width);
   }
 
+  /** The HUD height differs per device, so the line and the held bubble move with it. */
+  setLayout(dangerY: number, holdY: number): void {
+    this.dangerY = clamp(dangerY, 120, this.world.height * 0.4);
+    this.holdY = clamp(holdY, 60, this.world.height * 0.5);
+  }
+
   setBest(best: number): void {
     this.best = best;
   }
@@ -132,7 +142,7 @@ export class BubbleMergeGame {
     if (this.state !== 'playing' || !this.current || this.dropCooldown > 0) return false;
     const def = this.current;
     const x = this.heldX();
-    const bubble = this.spawn(def, x, DROP_Y, 0, DROP_SPEED);
+    const bubble = this.spawn(def, x, this.holdY, 0, DROP_SPEED);
     this.events.push({ type: 'drop', def, x, y: bubble.y });
     this.current = this.next ?? this.rollBubble();
     this.next = this.rollBubble();
@@ -176,7 +186,7 @@ export class BubbleMergeGame {
     for (const b of this.world.bodies) {
       if (!b.alive) continue;
       if (this.time - b.bornAt < 1) continue;
-      if (b.y - b.r < DANGER_Y) {
+      if (b.y - b.r < this.dangerY) {
         over = true;
         break;
       }

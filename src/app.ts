@@ -224,9 +224,10 @@ export async function bootstrap(): Promise<void> {
 
   const openCollection = (): void => {
     game.pause();
+    // Draw the grid first so the NEW badges of this run are visible, then clear them.
+    renderCollection();
     save = markSeen(save);
     persist();
-    renderCollection();
     show(screenCollection, true);
     audio.playUi();
   };
@@ -275,7 +276,7 @@ export async function bootstrap(): Promise<void> {
       img.loading = 'lazy';
       item.appendChild(img);
 
-      if (!has && def.special && def.hint) {
+      if (!has && def.hint) {
         const hint = document.createElement('span');
         hint.className = 'coll-hint';
         hint.textContent = localized(lang, def.hint);
@@ -424,6 +425,8 @@ export async function bootstrap(): Promise<void> {
 
   board.addEventListener('pointerdown', (e: PointerEvent) => {
     if (game.state !== 'playing') return;
+    // HUD buttons live inside .board: never let a tap on one turn into a captured drag.
+    if ((e.target as HTMLElement | null)?.closest('button, a, input')) return;
     audio.unlock();
     dragging = true;
     game.setPointer(pointToWorldX(e.clientX, e.clientY));
@@ -501,6 +504,11 @@ export async function bootstrap(): Promise<void> {
 
   const onResize = (): void => {
     renderer.resize();
+    game.setWorldHeight(renderer.worldHeight);
+    const boardTop = board.getBoundingClientRect().top;
+    const hudBottom = hud.getBoundingClientRect().bottom - boardTop;
+    const dangerY = renderer.cssToWorldY(hudBottom + 14);
+    game.setLayout(dangerY, dangerY + 62);
   };
   window.addEventListener('resize', onResize);
   window.addEventListener('orientationchange', onResize);

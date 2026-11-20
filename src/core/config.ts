@@ -131,6 +131,7 @@ export const LEGENDARY: BubbleDef = {
   radius: RL,
   score: LEGENDARY_BONUS,
   tint: '#f5c451',
+  hint: { en: 'Fuse MOMO ROYAL with KOMI ROYAL', ko: '모모 로열 + 코미 로열 합체' },
 };
 
 /** Trophy bubbles: they live only in the collection, unlocked by milestones. */

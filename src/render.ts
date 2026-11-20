@@ -1,6 +1,6 @@
 import type { BubbleMergeGame } from './core/game';
 import type { GameBubble } from './core/types';
-import { DANGER_Y, WORLD_HEIGHT, WORLD_WIDTH } from './core/config';
+import { MAX_WORLD_HEIGHT, MIN_WORLD_HEIGHT, WORLD_WIDTH } from './core/config';
 
 interface Particle {
   x: number;
@@ -60,6 +60,8 @@ export class Renderer {
   private dpr = 1;
   private shake = 0;
   private t = 0;
+  /** World height for the current viewport: the play field always fills the screen. */
+  worldHeight = 1280;
 
   constructor(canvas: HTMLCanvasElement, images: Record<string, HTMLImageElement>) {
     const ctx = canvas.getContext('2d', { alpha: true });
@@ -81,7 +83,7 @@ export class Renderer {
     for (let i = 0; i < 26; i++) {
       this.ambient.push({
         x: rand() * WORLD_WIDTH,
-        y: rand() * WORLD_HEIGHT,
+        y: rand() * this.worldHeight,
         r: 8 + rand() * 46,
         speed: 6 + rand() * 18,
         alpha: 0.03 + rand() * 0.06,
@@ -97,9 +99,14 @@ export class Renderer {
     this.dpr = Math.min(2, window.devicePixelRatio || 1);
     this.canvas.width = Math.round(w * this.dpr);
     this.canvas.height = Math.round(h * this.dpr);
-    this.scale = Math.min(w / WORLD_WIDTH, h / WORLD_HEIGHT);
-    this.offsetX = (w - WORLD_WIDTH * this.scale) / 2;
-    this.offsetY = (h - WORLD_HEIGHT * this.scale) / 2;
+    // The field is always exactly 720 units wide, so the play area fills the width.
+    // How many units are visible vertically depends on the device aspect ratio.
+    this.scale = w / WORLD_WIDTH;
+    const visible = h / this.scale;
+    this.worldHeight = Math.min(MAX_WORLD_HEIGHT, Math.max(MIN_WORLD_HEIGHT, visible));
+    this.offsetX = 0;
+    this.offsetY = (h - this.worldHeight * this.scale) / 2;
+    this.buildAmbient();
   }
 
   /** Converts a client-space point into world units. */
@@ -113,6 +120,11 @@ export class Renderer {
 
   get worldScale(): number {
     return this.scale;
+  }
+
+  /** Converts a CSS pixel offset from the canvas top into world units. */
+  cssToWorldY(cssY: number): number {
+    return (cssY - this.offsetY) / this.scale;
   }
 
   burst(x: number, y: number, color: string, power = 1, count = 14): void {
@@ -203,21 +215,22 @@ export class Renderer {
   }
 
   private drawBackground(ctx: CanvasRenderingContext2D): void {
-    const grad = ctx.createLinearGradient(0, 0, 0, WORLD_HEIGHT);
+    const H = this.worldHeight;
+    const grad = ctx.createLinearGradient(0, 0, 0, H);
     grad.addColorStop(0, '#141634');
     grad.addColorStop(0.45, '#101226');
     grad.addColorStop(1, '#1b1030');
     ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+    ctx.fillRect(0, 0, WORLD_WIDTH, H);
 
-    const glow = ctx.createRadialGradient(WORLD_WIDTH / 2, WORLD_HEIGHT * 0.18, 40, WORLD_WIDTH / 2, WORLD_HEIGHT * 0.18, 620);
+    const glow = ctx.createRadialGradient(WORLD_WIDTH / 2, H * 0.18, 40, WORLD_WIDTH / 2, H * 0.18, 620);
     glow.addColorStop(0, 'rgba(255, 196, 120, 0.16)');
     glow.addColorStop(1, 'rgba(255, 196, 120, 0)');
     ctx.fillStyle = glow;
-    ctx.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+    ctx.fillRect(0, 0, WORLD_WIDTH, H);
 
     for (const a of this.ambient) {
-      const y = ((a.y - this.t * a.speed) % (WORLD_HEIGHT + 200) + WORLD_HEIGHT + 200) % (WORLD_HEIGHT + 200) - 100;
+      const y = ((a.y - this.t * a.speed) % (H + 200) + H + 200) % (H + 200) - 100;
       ctx.beginPath();
       ctx.arc(a.x, y, a.r, 0, Math.PI * 2);
       ctx.fillStyle = `hsla(${a.hue}, 80%, 70%, ${a.alpha})`;
@@ -225,31 +238,33 @@ export class Renderer {
     }
 
     // floor
-    const floor = ctx.createLinearGradient(0, WORLD_HEIGHT - 90, 0, WORLD_HEIGHT);
+    const floor = ctx.createLinearGradient(0, H - 90, 0, H);
     floor.addColorStop(0, 'rgba(255, 214, 150, 0)');
     floor.addColorStop(1, 'rgba(255, 214, 150, 0.16)');
     ctx.fillStyle = floor;
-    ctx.fillRect(0, WORLD_HEIGHT - 90, WORLD_WIDTH, 90);
+    ctx.fillRect(0, H - 90, WORLD_WIDTH, 90);
   }
 
   private drawDangerLine(ctx: CanvasRenderingContext2D, game: BubbleMergeGame): void {
+    if (game.state === 'idle') return;
     const danger = game.dangerRatio();
+    const lineY = game.dangerY;
     ctx.save();
     ctx.setLineDash([14, 12]);
     ctx.lineWidth = 3;
     ctx.strokeStyle = danger > 0 ? `rgba(255, 90, 110, ${0.35 + danger * 0.6})` : 'rgba(255, 235, 255, 0.18)';
     ctx.beginPath();
-    ctx.moveTo(10, DANGER_Y);
-    ctx.lineTo(WORLD_WIDTH - 10, DANGER_Y);
+    ctx.moveTo(10, lineY);
+    ctx.lineTo(WORLD_WIDTH - 10, lineY);
     ctx.stroke();
     ctx.restore();
 
     if (danger > 0) {
-      const band = ctx.createLinearGradient(0, DANGER_Y - 40, 0, DANGER_Y + 60);
+      const band = ctx.createLinearGradient(0, lineY - 40, 0, lineY + 60);
       band.addColorStop(0, `rgba(255, 60, 90, ${0.05 + danger * 0.16})`);
       band.addColorStop(1, 'rgba(255, 60, 90, 0)');
       ctx.fillStyle = band;
-      ctx.fillRect(0, DANGER_Y - 40, WORLD_WIDTH, 100);
+      ctx.fillRect(0, lineY - 40, WORLD_WIDTH, 100);
     }
   }
 
@@ -261,14 +276,14 @@ export class Renderer {
       const def = game.current;
       const x = game.heldX();
       const bob = Math.sin(this.t * 3.2) * 5;
-      const y = 104 + bob;
+      const y = game.holdY + bob;
       ctx.save();
       ctx.setLineDash([6, 16]);
       ctx.strokeStyle = 'rgba(255, 230, 180, 0.22)';
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.moveTo(x, y + def.radius);
-      ctx.lineTo(x, WORLD_HEIGHT - 8);
+      ctx.lineTo(x, this.worldHeight - 8);
       ctx.stroke();
       ctx.restore();
 
@@ -408,11 +423,12 @@ export class Renderer {
 
   private drawSlowMotion(ctx: CanvasRenderingContext2D, game: BubbleMergeGame): void {
     const k = clamp(game.slowMo / 1.8, 0, 1);
-    const g = ctx.createRadialGradient(WORLD_WIDTH / 2, WORLD_HEIGHT / 2, 80, WORLD_WIDTH / 2, WORLD_HEIGHT / 2, WORLD_HEIGHT * 0.8);
+    const H = this.worldHeight;
+    const g = ctx.createRadialGradient(WORLD_WIDTH / 2, H / 2, 80, WORLD_WIDTH / 2, H / 2, H * 0.8);
     g.addColorStop(0, `rgba(255, 226, 150, ${0.05 + k * 0.06})`);
     g.addColorStop(1, `rgba(255, 180, 60, ${0.05 + k * 0.18})`);
     ctx.fillStyle = g;
-    ctx.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+    ctx.fillRect(0, 0, WORLD_WIDTH, H);
   }
 }
 
